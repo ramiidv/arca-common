@@ -44,12 +44,24 @@ export {
 // Validators
 // ---------------------------------------------------------------------------
 export {
+  // CUIT/CUIL
+  validateCuit,
+  normalizeCuit,
+  formatCuit,
+  isValidCuit,
+  // Aliases (backward compat)
   validateCuil,
-  validateCBU,
   normalizeCuil,
   formatCuil,
+  // CBU
+  validateCBU,
+  isValidCBU,
+  // Fechas
+  formatDate,
+  parseAfipDate,
   validateFecha,
   validateFechaRango,
+  // Helpers
   collectErrors,
   collectErrorsWithPrefix,
 } from './validators.js';

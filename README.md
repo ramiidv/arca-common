@@ -37,7 +37,7 @@ npm install @ramiidv/arca-common
 | **WsaaClient** | Cliente WSAA con firma CMS/PKCS#7, cache de tokens y deduplicacion de requests |
 | **SOAP client** | `soapCall`, `afipSoapCall`, `checkServiceErrors` — llamadas SOAP con retry, timeout y backoff exponencial |
 | **XML utilities** | `parseXml`, `buildXml`, `ensureArray`, `getNestedValue` — via fast-xml-parser |
-| **Validators** | `validateCuil`, `validateCBU`, `validateFecha`, `validateFechaRango` y helpers de recoleccion de errores |
+| **Validators** | `validateCuit`, `isValidCuit`, `validateCBU`, `isValidCBU`, `formatDate`, `parseAfipDate`, `validateFecha`, `validateFechaRango` |
 | **Errors** | Jerarquia de errores: `ArcaError`, `ArcaAuthError`, `ArcaSoapError`, `ArcaServiceError`, `ArcaValidationError` |
 | **Types** | `AccessTicket`, `ArcaBaseConfig`, `SoapCallOptions`, `ServerStatus`, `ArcaEvent` |
 | **Constants** | `WSAA_ENDPOINTS`, `DocTipo`, `Provincia` |
@@ -71,44 +71,64 @@ wsaa.clearTicket("wsfe");
 wsaa.clearAllTickets();
 ```
 
-### Validacion de CUIL/CUIT
+### Validacion de CUIT/CUIL
 
 ```typescript
-import { validateCuil, normalizeCuil, formatCuil } from "@ramiidv/arca-common";
+import { validateCuit, normalizeCuit, formatCuit, isValidCuit } from "@ramiidv/arca-common";
 
 // Valida formato y digito verificador, retorna 11 digitos
-const cuil = validateCuil("20-12345678-6"); // "20123456786"
-const cuil2 = validateCuil("20123456786");  // "20123456786"
+const cuit = validateCuit("20-12345678-6"); // "20123456786"
+const cuit2 = validateCuit(20123456786);    // "20123456786" (acepta number)
 
-// Normalizar (quitar guiones)
-normalizeCuil("20-12345678-9"); // "20123456789"
+// Check sin lanzar error
+if (isValidCuit(cuitDelCliente)) {
+  // procesar...
+}
+
+// Normalizar (quitar guiones, acepta number)
+normalizeCuit("20-12345678-6"); // "20123456786"
+normalizeCuit(20123456786);     // "20123456786"
 
 // Formatear
-formatCuil("20123456789"); // "20-12345678-9"
+formatCuit("20123456786"); // "20-12345678-6"
+formatCuit(20123456786);   // "20-12345678-6"
 
 // Lanza ArcaValidationError si es invalido
 try {
-  validateCuil("00000000000");
+  validateCuit("00000000000");
 } catch (e) {
-  console.error(e.message);  // "CUIL/CUIT invalido: ..."
-  console.error(e.details);  // [{ field: "cuil", message: "...", value: "..." }]
+  console.error(e.message);  // "CUIT invalido: ..."
+  console.error(e.details);  // [{ field: "cuit", message: "...", value: "..." }]
 }
 ```
 
 ### Validacion de CBU
 
 ```typescript
-import { validateCBU } from "@ramiidv/arca-common";
+import { validateCBU, isValidCBU } from "@ramiidv/arca-common";
 
 // Valida formato de 22 digitos y checksums de ambos bloques
-const cbu = validateCBU("0110599940000041817220");
+const cbu = validateCBU("0110599140000041817221");
 
-// Lanza ArcaValidationError si es invalido
-try {
-  validateCBU("1234567890123456789012");
-} catch (e) {
-  console.error(e.details);
+// Check sin lanzar error
+if (isValidCBU(cbuDelCliente)) {
+  // procesar...
 }
+```
+
+### Fechas (formato AFIP)
+
+```typescript
+import { formatDate, parseAfipDate } from "@ramiidv/arca-common";
+
+// Formatear a YYYYMMDD (formato AFIP, timezone Argentina)
+formatDate(new Date());          // "20260331"
+formatDate("20260331");          // "20260331" (passthrough)
+formatDate("2026-03-31");        // "20260331" (parsea ISO)
+
+// Parsear YYYYMMDD a Date
+const fecha = parseAfipDate("20260331"); // Date(2026, 2, 31)
+parseAfipDate("2026-03-31");             // tambien acepta guiones
 ```
 
 ### SOAP client
@@ -244,10 +264,14 @@ console.log(Provincia.CORDOBA);      // 3
 
 | Funcion | Retorno | Descripcion |
 | --- | --- | --- |
-| `validateCuil(cuil)` | `string` | Valida CUIL/CUIT (formato + checksum), retorna 11 digitos |
-| `normalizeCuil(cuil)` | `string` | Elimina guiones del CUIL/CUIT |
-| `formatCuil(cuil)` | `string` | Formatea como XX-XXXXXXXX-X |
+| `validateCuit(cuit)` | `string` | Valida CUIT/CUIL (formato + checksum), retorna 11 digitos. Acepta `string \| number` |
+| `isValidCuit(cuit)` | `boolean` | Verifica si un CUIT es valido sin lanzar error |
+| `normalizeCuit(cuit)` | `string` | Elimina guiones, acepta `string \| number` |
+| `formatCuit(cuit)` | `string` | Formatea como XX-XXXXXXXX-X, acepta `string \| number` |
 | `validateCBU(cbu)` | `string` | Valida CBU (22 digitos + checksums de bloques) |
+| `isValidCBU(cbu)` | `boolean` | Verifica si un CBU es valido sin lanzar error |
+| `formatDate(date)` | `string` | Formatea `Date \| string` a YYYYMMDD (timezone Argentina) |
+| `parseAfipDate(str)` | `Date` | Parsea YYYYMMDD o YYYY-MM-DD a Date |
 | `validateFecha(date, fieldName)` | `void` | Valida que sea un Date valido |
 | `validateFechaRango(inicio, fin)` | `void` | Valida que fin sea posterior a inicio |
 | `collectErrors(fn, errors)` | `void` | Ejecuta validacion y recolecta errores sin lanzar |

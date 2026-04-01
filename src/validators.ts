@@ -2,58 +2,59 @@ import { ArcaValidationError } from './errors.js';
 import type { ValidationErrorDetail } from './errors.js';
 
 // ---------------------------------------------------------------------------
-// CUIL / CUIT
+// CUIT / CUIL
 // ---------------------------------------------------------------------------
 
-const CUIL_WEIGHTS = [5, 4, 3, 2, 7, 6, 5, 4, 3, 2] as const;
+const CUIT_WEIGHTS = [5, 4, 3, 2, 7, 6, 5, 4, 3, 2] as const;
 const VALID_PREFIXES = [20, 23, 24, 27, 30, 33, 34];
 
 /**
- * Elimina guiones de un CUIL/CUIT, retornando los 11 dígitos.
+ * Normaliza un CUIT/CUIL a 11 dígitos.
+ * Acepta string con o sin guiones, o number.
  */
-export function normalizeCuil(cuil: string): string {
-  return cuil.replace(/-/g, '');
+export function normalizeCuit(cuit: string | number): string {
+  return String(cuit).replace(/-/g, '');
 }
 
 /**
- * Formatea un CUIL/CUIT como XX-XXXXXXXX-X.
+ * Formatea un CUIT/CUIL como XX-XXXXXXXX-X.
+ * Acepta string con o sin guiones, o number.
  */
-export function formatCuil(cuil: string): string {
-  const normalized = normalizeCuil(cuil);
-  return `${normalized.slice(0, 2)}-${normalized.slice(2, 10)}-${normalized.slice(10)}`;
+export function formatCuit(cuit: string | number): string {
+  const n = normalizeCuit(cuit);
+  return `${n.slice(0, 2)}-${n.slice(2, 10)}-${n.slice(10)}`;
 }
 
 /**
- * Valida un CUIL/CUIT (formato y dígito verificador).
- * Acepta formato XX-XXXXXXXX-X o XXXXXXXXXXX.
- * Retorna el CUIL/CUIT normalizado (11 dígitos).
- * @throws ArcaValidationError si el CUIL/CUIT es inválido.
+ * Valida un CUIT/CUIL (formato y dígito verificador).
+ * Acepta formato XX-XXXXXXXX-X, XXXXXXXXXXX, o number.
+ * Retorna el CUIT/CUIL normalizado (11 dígitos).
+ * @throws ArcaValidationError si el CUIT/CUIL es inválido.
  */
-export function validateCuil(cuil: string): string {
-  const normalized = normalizeCuil(cuil);
+export function validateCuit(cuit: string | number): string {
+  const normalized = normalizeCuit(cuit);
 
   if (!/^\d{11}$/.test(normalized)) {
     throw new ArcaValidationError(
-      `CUIL/CUIT inválido: "${cuil}". Debe tener 11 dígitos.`,
-      [{ field: 'cuil', message: 'El CUIL/CUIT debe tener 11 dígitos numéricos', value: cuil }],
-      'cuil',
+      `CUIT inválido: "${cuit}". Debe tener 11 dígitos.`,
+      [{ field: 'cuit', message: 'El CUIT debe tener 11 dígitos numéricos', value: cuit }],
+      'cuit',
     );
   }
 
   const prefix = parseInt(normalized.slice(0, 2), 10);
   if (!VALID_PREFIXES.includes(prefix)) {
     throw new ArcaValidationError(
-      `CUIL/CUIT inválido: "${cuil}". Prefijo ${prefix} no es válido.`,
-      [{ field: 'cuil', message: `Prefijo ${prefix} no es un prefijo CUIL/CUIT válido`, value: cuil }],
-      'cuil',
+      `CUIT inválido: "${cuit}". Prefijo ${prefix} no es válido.`,
+      [{ field: 'cuit', message: `Prefijo ${prefix} no es un prefijo CUIT válido`, value: cuit }],
+      'cuit',
     );
   }
 
-  // Validación de dígito verificador
   const digits = normalized.split('').map(Number);
   let sum = 0;
   for (let i = 0; i < 10; i++) {
-    sum += digits[i] * CUIL_WEIGHTS[i];
+    sum += digits[i] * CUIT_WEIGHTS[i];
   }
 
   const remainder = sum % 11;
@@ -62,12 +63,10 @@ export function validateCuil(cuil: string): string {
   if (remainder === 0) {
     expectedCheck = 0;
   } else if (remainder === 1) {
-    // 11 - 1 = 10, no representable en un dígito.
-    // AFIP ajusta el prefijo (ej: 20→23 o 27→23) para evitar este caso.
     throw new ArcaValidationError(
-      `CUIL/CUIT inválido: "${cuil}". Dígito verificador no puede ser calculado (remainder=1).`,
-      [{ field: 'cuil', message: 'CUIL/CUIT con dígito verificador inválido (remainder=1)', value: cuil }],
-      'cuil',
+      `CUIT inválido: "${cuit}". Dígito verificador no puede ser calculado (remainder=1).`,
+      [{ field: 'cuit', message: 'CUIT con dígito verificador inválido (remainder=1)', value: cuit }],
+      'cuit',
     );
   } else {
     expectedCheck = 11 - remainder;
@@ -75,18 +74,39 @@ export function validateCuil(cuil: string): string {
 
   if (digits[10] !== expectedCheck) {
     throw new ArcaValidationError(
-      `CUIL/CUIT inválido: "${cuil}". Dígito verificador incorrecto (esperado: ${expectedCheck}, recibido: ${digits[10]}).`,
+      `CUIT inválido: "${cuit}". Dígito verificador incorrecto (esperado: ${expectedCheck}, recibido: ${digits[10]}).`,
       [{
-        field: 'cuil',
+        field: 'cuit',
         message: `Dígito verificador incorrecto (esperado: ${expectedCheck}, recibido: ${digits[10]})`,
-        value: cuil,
+        value: cuit,
       }],
-      'cuil',
+      'cuit',
     );
   }
 
   return normalized;
 }
+
+/**
+ * Verifica si un CUIT/CUIL es válido sin lanzar error.
+ * Acepta string con o sin guiones, o number.
+ */
+export function isValidCuit(cuit: string | number): boolean {
+  try {
+    validateCuit(cuit);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Aliases para backward compat (CUIL y CUIT usan el mismo algoritmo)
+/** @deprecated Usar `validateCuit` */
+export const validateCuil = validateCuit;
+/** @deprecated Usar `normalizeCuit` */
+export const normalizeCuil = normalizeCuit;
+/** @deprecated Usar `formatCuit` */
+export const formatCuil = formatCuit;
 
 // ---------------------------------------------------------------------------
 // CBU
@@ -107,20 +127,17 @@ export function validateCBU(cbu: string): string {
   }
 
   // Bloque 1: primeros 8 dígitos (código banco + sucursal + dígito verificador)
-  const block1 = cbu.slice(0, 8);
-  const block1Digits = block1.split('').map(Number);
-  const block1Weights = [7, 1, 3, 7, 1, 3, 7];
-  let block1Sum = 0;
-  for (let i = 0; i < 7; i++) {
-    block1Sum += block1Digits[i] * block1Weights[i];
-  }
-  const block1Check = (10 - (block1Sum % 10)) % 10;
-  if (block1Digits[7] !== block1Check) {
+  const b1 = cbu.slice(0, 8).split('').map(Number);
+  const b1w = [7, 1, 3, 7, 1, 3, 7];
+  let b1sum = 0;
+  for (let i = 0; i < 7; i++) b1sum += b1[i] * b1w[i];
+  const b1check = (10 - (b1sum % 10)) % 10;
+  if (b1[7] !== b1check) {
     throw new ArcaValidationError(
       `CBU inválido: "${cbu}". Dígito verificador del bloque 1 incorrecto.`,
       [{
         field: 'cbu',
-        message: `Dígito verificador del bloque 1 incorrecto (esperado: ${block1Check}, recibido: ${block1Digits[7]})`,
+        message: `Dígito verificador del bloque 1 incorrecto (esperado: ${b1check}, recibido: ${b1[7]})`,
         value: cbu,
       }],
       'cbu',
@@ -128,20 +145,17 @@ export function validateCBU(cbu: string): string {
   }
 
   // Bloque 2: últimos 14 dígitos (número de cuenta + dígito verificador)
-  const block2 = cbu.slice(8, 22);
-  const block2Digits = block2.split('').map(Number);
-  const block2Weights = [3, 7, 1, 3, 7, 1, 3, 7, 1, 3, 7, 1, 3];
-  let block2Sum = 0;
-  for (let i = 0; i < 13; i++) {
-    block2Sum += block2Digits[i] * block2Weights[i];
-  }
-  const block2Check = (10 - (block2Sum % 10)) % 10;
-  if (block2Digits[13] !== block2Check) {
+  const b2 = cbu.slice(8, 22).split('').map(Number);
+  const b2w = [3, 7, 1, 3, 7, 1, 3, 7, 1, 3, 7, 1, 3];
+  let b2sum = 0;
+  for (let i = 0; i < 13; i++) b2sum += b2[i] * b2w[i];
+  const b2check = (10 - (b2sum % 10)) % 10;
+  if (b2[13] !== b2check) {
     throw new ArcaValidationError(
       `CBU inválido: "${cbu}". Dígito verificador del bloque 2 incorrecto.`,
       [{
         field: 'cbu',
-        message: `Dígito verificador del bloque 2 incorrecto (esperado: ${block2Check}, recibido: ${block2Digits[13]})`,
+        message: `Dígito verificador del bloque 2 incorrecto (esperado: ${b2check}, recibido: ${b2[13]})`,
         value: cbu,
       }],
       'cbu',
@@ -151,9 +165,68 @@ export function validateCBU(cbu: string): string {
   return cbu;
 }
 
+/**
+ * Verifica si un CBU es válido sin lanzar error.
+ */
+export function isValidCBU(cbu: string): boolean {
+  try {
+    validateCBU(cbu);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
-// Fecha
+// Fechas
 // ---------------------------------------------------------------------------
+
+/**
+ * Formatea una fecha al formato YYYYMMDD que usa AFIP/ARCA.
+ * Acepta Date o string. Si recibe un string en formato YYYYMMDD, lo devuelve tal cual.
+ * Usa timezone Argentina (UTC-3).
+ */
+export function formatDate(date: Date | string): string {
+  if (typeof date === 'string') {
+    if (/^\d{8}$/.test(date)) return date;
+    // Intentar parsear ISO u otros formatos
+    const parsed = new Date(date);
+    if (isNaN(parsed.getTime())) {
+      throw new ArcaValidationError(
+        `Fecha inválida: "${date}"`,
+        [{ field: 'fecha', message: 'No se pudo parsear la fecha', value: date }],
+        'fecha',
+      );
+    }
+    date = parsed;
+  }
+
+  // Formatear en timezone Argentina (UTC-3)
+  const ar = new Date(date.getTime() - 3 * 60 * 60_000 + date.getTimezoneOffset() * 60_000);
+  const y = ar.getFullYear();
+  const m = String(ar.getMonth() + 1).padStart(2, '0');
+  const d = String(ar.getDate()).padStart(2, '0');
+  return `${y}${m}${d}`;
+}
+
+/**
+ * Parsea una fecha en formato YYYYMMDD (usado por AFIP/ARCA) a Date.
+ * También acepta YYYY-MM-DD.
+ */
+export function parseAfipDate(dateStr: string): Date {
+  const clean = dateStr.replace(/-/g, '');
+  if (!/^\d{8}$/.test(clean)) {
+    throw new ArcaValidationError(
+      `Fecha AFIP inválida: "${dateStr}". Formato esperado: YYYYMMDD.`,
+      [{ field: 'fecha', message: 'Formato de fecha inválido, se espera YYYYMMDD', value: dateStr }],
+      'fecha',
+    );
+  }
+  const y = parseInt(clean.slice(0, 4), 10);
+  const m = parseInt(clean.slice(4, 6), 10) - 1;
+  const d = parseInt(clean.slice(6, 8), 10);
+  return new Date(y, m, d);
+}
 
 /**
  * Valida que un valor sea un Date válido.
@@ -193,12 +266,12 @@ export function validateFechaRango(fechaInicio: Date, fechaFin: Date | undefined
 }
 
 // ---------------------------------------------------------------------------
-// Helpers para recolección de errores
+// Helpers para recolección de errores (uso interno de SDKs)
 // ---------------------------------------------------------------------------
 
 /**
  * Ejecuta una función de validación y recolecta errores en el array provisto
- * en vez de lanzar.
+ * en vez de lanzar. Útil para validar múltiples campos y reportar todos los errores juntos.
  */
 export function collectErrors(fn: () => void, errors: ValidationErrorDetail[]): void {
   try {

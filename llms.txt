@@ -144,27 +144,50 @@ function getNestedValue(obj: Record<string, unknown>, ...keys: string[]): unknow
 ### Validators (validators.ts)
 
 ```typescript
-// Validates CUIL/CUIT format and check digit. Accepts "XX-XXXXXXXX-X" or "XXXXXXXXXXX".
-// Returns normalized 11-digit string. Throws ArcaValidationError if invalid.
-// Checks: 11 digits, valid prefix (20/23/24/27/30/33/34), checksum via weighted algorithm.
-function validateCuil(cuil: string): string;
+// CUIT/CUIL — accepts string ("XX-XXXXXXXX-X", "XXXXXXXXXXX") or number
 
-// Validates CBU (22-digit Argentine bank account number).
-// Verifies block 1 checksum (digits 1-8) and block 2 checksum (digits 9-22).
-// Returns the validated CBU string. Throws ArcaValidationError if invalid.
+// Validates CUIT format and Módulo 11 check digit.
+// Returns normalized 11-digit string. Throws ArcaValidationError if invalid.
+function validateCuit(cuit: string | number): string;
+
+// Non-throwing boolean check. Returns true if valid, false otherwise.
+function isValidCuit(cuit: string | number): boolean;
+
+// Remove hyphens, convert number to string. Returns 11 digits.
+function normalizeCuit(cuit: string | number): string;
+
+// Format as "XX-XXXXXXXX-X". Accepts string or number.
+function formatCuit(cuit: string | number): string;
+
+// Backward-compatible aliases (same functions):
+const validateCuil = validateCuit;
+const normalizeCuil = normalizeCuit;
+const formatCuil = formatCuit;
+
+// CBU (22-digit Argentine bank account number)
+
+// Validates format + block 1/block 2 checksums. Throws ArcaValidationError.
 function validateCBU(cbu: string): string;
 
-// Remove hyphens from CUIL/CUIT string
-function normalizeCuil(cuil: string): string;
+// Non-throwing boolean check.
+function isValidCBU(cbu: string): boolean;
 
-// Format CUIL/CUIT as "XX-XXXXXXXX-X"
-function formatCuil(cuil: string): string;
+// Dates (AFIP format)
+
+// Format Date or string to YYYYMMDD (AFIP standard). Uses Argentina timezone (UTC-3).
+// Passes through YYYYMMDD strings. Parses ISO strings.
+function formatDate(date: Date | string): string;
+
+// Parse YYYYMMDD or YYYY-MM-DD string to Date.
+function parseAfipDate(dateStr: string): Date;
 
 // Validate that a Date object is valid. Throws ArcaValidationError if not.
 function validateFecha(date: Date, fieldName: string): void;
 
 // Validate that fechaFin is after fechaInicio. Throws ArcaValidationError if not.
 function validateFechaRango(fechaInicio: Date, fechaFin: Date | undefined): void;
+
+// Error collection helpers (for SDK authors building validators)
 
 // Run a validation function and collect errors into an array instead of throwing.
 function collectErrors(fn: () => void, errors: ValidationErrorDetail[]): void;
