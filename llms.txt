@@ -1,0 +1,329 @@
+# @ramiidv/arca-common
+
+> Shared TypeScript utilities for the ARCA (formerly AFIP) SDK ecosystem.
+> Foundation library used by @ramiidv/arca-facturacion, @ramiidv/arca-padron, @ramiidv/arca-empleados, etc.
+
+## What this package provides
+
+- WSAA authentication client (CMS/PKCS#7 signing, token caching, request deduplication)
+- Generic SOAP client with retry, timeout, and exponential backoff
+- XML parsing/building utilities (via fast-xml-parser)
+- Error class hierarchy for all ARCA SDKs
+- CUIL/CUIT and CBU validators with checksum verification
+- Date validation utilities
+- Shared TypeScript types and constants
+
+## Install
+
+```bash
+npm install @ramiidv/arca-common
+```
+
+Requires Node.js >= 18. Uses native `fetch` (no axios/node-fetch dependency).
+
+## Architecture
+
+```
+src/
+  index.ts        — re-exports everything
+  wsaa.ts         — WsaaClient class (WSAA authentication)
+  soap-client.ts  — SOAP call functions and XML utilities
+  errors.ts       — error class hierarchy
+  validators.ts   — CUIL/CUIT, CBU, date validators
+  types.ts        — shared TypeScript interfaces
+  constants.ts    — WSAA endpoints, DocTipo, Provincia enums
+```
+
+Dependencies:
+- `fast-xml-parser` (^5.0.0) — XML parsing and building
+- `node-forge` (^1.3.0) — CMS/PKCS#7 signing for WSAA
+
+## Exported classes
+
+### WsaaClient
+
+WSAA (Web Service de Autenticacion y Autorizacion) client. Handles TRA creation, CMS/PKCS#7 signing, login, and token caching.
+
+```typescript
+import { WsaaClient } from "@ramiidv/arca-common";
+
+const wsaa = new WsaaClient({
+  cert: string,               // X.509 certificate PEM
+  key: string,                // RSA private key PEM
+  production?: boolean,       // Default: false (testing/homologacion)
+  endpoint?: string,          // Custom WSAA URL (overrides production flag)
+  tokenTTLMinutes?: number,   // Default: 720 (12 hours)
+  timeout?: number,           // Default: 30000ms
+  retries?: number,           // Default: 1
+  retryDelayMs?: number,      // Default: 1000ms (exponential backoff)
+  onEvent?: (event: ArcaEvent) => void,
+});
+```
+
+Methods:
+- `getAccessTicket(service: string): Promise<AccessTicket>` — get auth ticket (cached + deduped)
+- `clearTicket(service: string): void` — invalidate cached ticket for a service
+- `clearAllTickets(): void` — invalidate all cached tickets
+
+Token caching: tickets are cached in memory by service name. A 2-minute safety margin is applied before expiry. Concurrent login requests for the same service are deduplicated (only one actual SOAP call).
+
+### Error classes
+
+All extend `ArcaError` which extends `Error`.
+
+```typescript
+class ArcaError extends Error { name: "ArcaError" }
+
+class ArcaAuthError extends ArcaError { name: "ArcaAuthError" }
+// Thrown when: WSAA login fails, certificate is invalid, unexpected WSAA response
+
+class ArcaSoapError extends ArcaError {
+  name: "ArcaSoapError";
+  statusCode?: number;  // HTTP status code if available
+}
+// Thrown when: HTTP request fails, timeout, SOAP Fault received
+
+class ArcaServiceError extends ArcaError {
+  name: "ArcaServiceError";
+  errors: { code: number; msg: string }[];
+}
+// Thrown when: ARCA web service returns business errors (e.g. invalid CUIT, rejected invoice)
+
+class ArcaValidationError extends ArcaError {
+  name: "ArcaValidationError";
+  field?: string;
+  details: ValidationErrorDetail[];  // { field: string; message: string; value?: unknown }
+}
+// Thrown when: input data fails validation (invalid CUIL format, bad CBU checksum, etc.)
+```
+
+## Exported functions
+
+### SOAP client (soap-client.ts)
+
+```typescript
+// Low-level SOAP call. Builds envelope, sends via fetch with AbortController timeout,
+// parses XML response. Retries on 5xx and network errors with exponential backoff.
+function soapCall(
+  endpoint: string,
+  bodyContent: string,       // Raw XML to place inside <soapenv:Body>
+  opts?: SoapCallOptions,
+): Promise<Record<string, unknown>>;
+
+// High-level SOAP call for ARCA web services.
+// Builds namespaced method body, sets SOAPAction, calls soapCall,
+// extracts {method}Response/{method}Result from the response.
+// Detects SOAP Faults and throws ArcaSoapError.
+function afipSoapCall(
+  endpoint: string,
+  namespace: string,         // e.g. "http://ar.gov.afip.dif.FEV1/"
+  method: string,            // e.g. "FECAESolicitar"
+  params: Record<string, unknown>,
+  opts?: SoapCallOptions,
+): Promise<Record<string, unknown>>;
+
+// Checks if ARCA response contains business errors (Errors/Err nodes).
+// Throws ArcaServiceError if errors found.
+function checkServiceErrors(result: Record<string, unknown>, serviceName: string): void;
+
+// Parse XML string to JS object
+function parseXml(xml: string): Record<string, unknown>;
+
+// Build XML string from JS object
+function buildXml(obj: Record<string, unknown>): string;
+
+// Normalize value/array/undefined to array.
+// Useful for SOAP responses where single elements aren't wrapped in arrays.
+function ensureArray<T>(val: T | T[] | undefined | null): T[];
+
+// Try multiple keys on an object, return first match.
+// Useful for SOAP responses where namespace prefixes vary.
+function getNestedValue(obj: Record<string, unknown>, ...keys: string[]): unknown;
+```
+
+### Validators (validators.ts)
+
+```typescript
+// Validates CUIL/CUIT format and check digit. Accepts "XX-XXXXXXXX-X" or "XXXXXXXXXXX".
+// Returns normalized 11-digit string. Throws ArcaValidationError if invalid.
+// Checks: 11 digits, valid prefix (20/23/24/27/30/33/34), checksum via weighted algorithm.
+function validateCuil(cuil: string): string;
+
+// Validates CBU (22-digit Argentine bank account number).
+// Verifies block 1 checksum (digits 1-8) and block 2 checksum (digits 9-22).
+// Returns the validated CBU string. Throws ArcaValidationError if invalid.
+function validateCBU(cbu: string): string;
+
+// Remove hyphens from CUIL/CUIT string
+function normalizeCuil(cuil: string): string;
+
+// Format CUIL/CUIT as "XX-XXXXXXXX-X"
+function formatCuil(cuil: string): string;
+
+// Validate that a Date object is valid. Throws ArcaValidationError if not.
+function validateFecha(date: Date, fieldName: string): void;
+
+// Validate that fechaFin is after fechaInicio. Throws ArcaValidationError if not.
+function validateFechaRango(fechaInicio: Date, fechaFin: Date | undefined): void;
+
+// Run a validation function and collect errors into an array instead of throwing.
+function collectErrors(fn: () => void, errors: ValidationErrorDetail[]): void;
+
+// Like collectErrors but prefixes field names in collected errors.
+function collectErrorsWithPrefix(fn: () => void, errors: ValidationErrorDetail[], prefix: string): void;
+```
+
+## Exported types (types.ts)
+
+```typescript
+interface AccessTicket {
+  token: string;
+  sign: string;
+  expirationTime: Date;
+}
+
+interface ArcaBaseConfig {
+  cert: string;                               // X.509 certificate PEM
+  key: string;                                // Private key PEM
+  production?: boolean;                       // Default: false
+  timeout?: number;                           // Default: 30000ms
+  retries?: number;                           // Default: 1
+  retryDelayMs?: number;                      // Default: 1000ms
+  onEvent?: (event: ArcaEvent) => void;
+}
+
+interface SoapCallOptions {
+  timeout?: number;                           // Default: 30000ms
+  retries?: number;                           // Default: 1
+  retryDelayMs?: number;                      // Default: 1000ms
+  soapAction?: string;
+  onEvent?: (event: ArcaEvent) => void;
+  methodName?: string;                        // For event reporting
+}
+
+interface ServerStatus {
+  appserver: string;
+  dbserver: string;
+  authserver: string;
+}
+
+// Discriminated union of SDK events
+type ArcaEvent =
+  | { type: "auth:login"; service: string; durationMs?: number }
+  | { type: "auth:cache-hit"; service: string }
+  | { type: "request:start"; method: string; endpoint: string }
+  | { type: "request:end"; method: string; endpoint: string; durationMs: number }
+  | { type: "request:retry"; method: string; endpoint: string; attempt: number; error: Error | string }
+  | { type: "request:error"; method: string; endpoint: string; error: Error | string };
+
+interface WsaaClientConfig {
+  cert: string;
+  key: string;
+  production?: boolean;
+  endpoint?: string;
+  tokenTTLMinutes?: number;                   // Default: 720
+  timeout?: number;                           // Default: 30000
+  retries?: number;                           // Default: 1
+  retryDelayMs?: number;                      // Default: 1000
+  onEvent?: (event: ArcaEvent) => void;
+}
+
+interface ValidationErrorDetail {
+  field: string;
+  message: string;
+  value?: unknown;
+}
+```
+
+## Exported constants (constants.ts)
+
+```typescript
+const WSAA_ENDPOINTS = {
+  testing: "https://wsaahomo.afip.gov.ar/ws/services/LoginCms",
+  production: "https://wsaa.afip.gov.ar/ws/services/LoginCms",
+} as const;
+
+const WSAA_NAMESPACE = "http://wsaa.view.sua.dvadac.desein.afip.gov";
+
+enum DocTipo {
+  CUIT = 80,
+  CUIL = 86,
+  CDI = 87,
+  LE = 89,
+  LC = 90,
+  CI_EXTRANJERA = 91,
+  EN_TRAMITE = 92,
+  ACTA_NACIMIENTO = 93,
+  PASAPORTE = 94,
+  CI_BS_AS_RNP = 95,
+  DNI = 96,
+  CONSUMIDOR_FINAL = 99,
+}
+
+enum Provincia {
+  CIUDAD_AUTONOMA_DE_BUENOS_AIRES = 0,
+  BUENOS_AIRES = 1,
+  CATAMARCA = 2,
+  CORDOBA = 3,
+  CORRIENTES = 4,
+  ENTRE_RIOS = 5,
+  JUJUY = 6,
+  MENDOZA = 7,
+  LA_RIOJA = 8,
+  SALTA = 9,
+  SAN_JUAN = 10,
+  SAN_LUIS = 11,
+  SANTA_FE = 12,
+  SANTIAGO_DEL_ESTERO = 13,
+  TUCUMAN = 14,
+  CHACO = 15,
+  CHUBUT = 16,
+  FORMOSA = 17,
+  MISIONES = 18,
+  NEUQUEN = 19,
+  LA_PAMPA = 20,
+  RIO_NEGRO = 21,
+  SANTA_CRUZ = 22,
+  TIERRA_DEL_FUEGO = 23,
+}
+```
+
+## Error handling pattern
+
+```typescript
+import { ArcaAuthError, ArcaSoapError, ArcaServiceError, ArcaValidationError } from "@ramiidv/arca-common";
+
+try {
+  await wsaa.getAccessTicket("wsfe");
+} catch (e) {
+  if (e instanceof ArcaValidationError) {
+    // Input validation failed
+    e.field;    // which field
+    e.details;  // [{ field, message, value }]
+  }
+  if (e instanceof ArcaAuthError) {
+    // WSAA authentication failed
+  }
+  if (e instanceof ArcaServiceError) {
+    // ARCA business error
+    e.errors;  // [{ code: number, msg: string }]
+  }
+  if (e instanceof ArcaSoapError) {
+    // HTTP/transport error
+    e.statusCode;  // number | undefined
+  }
+}
+```
+
+## Retry behavior
+
+Enabled by default (`retries: 1`). Retries on: HTTP 5xx, network errors (TypeError from fetch), AbortError (timeout). Does NOT retry on: 4xx, business errors, validation errors. Backoff formula: `retryDelayMs * 2^(attempt-1)`.
+
+## Key domain concepts
+
+- **WSAA**: Web Service de Autenticacion y Autorizacion. ARCA's auth service using CMS/PKCS#7 signed XML tickets.
+- **TRA**: Ticket de Requerimiento de Acceso. XML document signed with the cert/key pair and sent to WSAA.
+- **Access Ticket (TA)**: token + sign pair returned by WSAA, valid for a specific service and time window.
+- **CUIT/CUIL**: Argentine tax/personal ID numbers (11 digits with weighted checksum).
+- **CBU**: Argentine bank account number (22 digits with block checksums).
+- **Homologacion**: ARCA's testing/sandbox environment.

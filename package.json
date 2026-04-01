@@ -1,0 +1,64 @@
+{
+  "name": "@ramiidv/arca-common",
+  "version": "0.1.0",
+  "description": "Utilidades compartidas para los SDKs de ARCA (ex AFIP) - WSAA, SOAP client, validadores, tipos comunes",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md",
+    "llms.txt"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "keywords": [
+    "arca",
+    "afip",
+    "argentina",
+    "sdk",
+    "typescript",
+    "wsaa",
+    "soap",
+    "common"
+  ],
+  "author": "ramiidv",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ramiidv/arca-common.git"
+  },
+  "homepage": "https://github.com/ramiidv/arca-common#readme",
+  "bugs": {
+    "url": "https://github.com/ramiidv/arca-common/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.0.0",
+    "node-forge": "^1.3.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0",
+    "@types/node-forge": "^1.3.0"
+  }
+}
