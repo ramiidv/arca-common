@@ -137,6 +137,7 @@ parseAfipDate("2026-03-31");             // tambien acepta guiones
 import { soapCall, afipSoapCall, checkServiceErrors, parseXml, buildXml } from "@ramiidv/arca-common";
 
 // Llamada SOAP de bajo nivel
+const bodyXml = '<FEDummy xmlns="http://ar.gov.afip.dif.FEV1/"/>';
 const result = await soapCall("https://wswhomo.afip.gov.ar/wsfev1/service.asmx", bodyXml, {
   timeout: 30_000,
   retries: 2,
@@ -333,6 +334,15 @@ const wsaa = new WsaaClient({
   retryDelayMs: 2000,  // 2s, 4s
 });
 ```
+
+## Ejemplos
+
+Ver la carpeta [`examples/`](./examples/) para ejemplos completos:
+
+- [`autenticacion-wsaa.ts`](./examples/autenticacion-wsaa.ts) — Login WSAA, cache de tokens, invalidacion
+- [`validar-cuit-cbu.ts`](./examples/validar-cuit-cbu.ts) — validateCuit, isValidCuit, formatCuit, CBU
+- [`fechas-afip.ts`](./examples/fechas-afip.ts) — formatDate, parseAfipDate
+- [`manejo-errores.ts`](./examples/manejo-errores.ts) — Jerarquia completa de errores
 
 ## Licencia
 

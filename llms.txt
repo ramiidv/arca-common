@@ -9,7 +9,7 @@
 - Generic SOAP client with retry, timeout, and exponential backoff
 - XML parsing/building utilities (via fast-xml-parser)
 - Error class hierarchy for all ARCA SDKs
-- CUIL/CUIT and CBU validators with checksum verification
+- CUIT/CUIL and CBU validators with checksum verification
 - Date validation utilities
 - Shared TypeScript types and constants
 
