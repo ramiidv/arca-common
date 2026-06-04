@@ -77,11 +77,11 @@ try {
 // CBU — validación
 // ---------------------------------------------------------------------------
 
-const cbu = validateCBU("0110599140000041817221");
+const cbu = validateCBU("0110599500000041817221");
 console.log("CBU validado:", cbu);
 
 // Check booleano
-console.log(isValidCBU("0110599140000041817221")); // true
+console.log(isValidCBU("0110599500000041817221")); // true
 console.log(isValidCBU("1234567890123456789012")); // false
 
 // Error detallado

@@ -128,7 +128,8 @@ export function validateCBU(cbu: string): string {
 
   // Bloque 1: primeros 8 dígitos (código banco + sucursal + dígito verificador)
   const b1 = cbu.slice(0, 8).split('').map(Number);
-  const b1w = [7, 1, 3, 7, 1, 3, 7];
+  // Ponderadores oficiales BCRA: 7-1-3-9 cíclico (patrón "7139713")
+  const b1w = [7, 1, 3, 9, 7, 1, 3];
   let b1sum = 0;
   for (let i = 0; i < 7; i++) b1sum += b1[i] * b1w[i];
   const b1check = (10 - (b1sum % 10)) % 10;
@@ -146,7 +147,8 @@ export function validateCBU(cbu: string): string {
 
   // Bloque 2: últimos 14 dígitos (número de cuenta + dígito verificador)
   const b2 = cbu.slice(8, 22).split('').map(Number);
-  const b2w = [3, 7, 1, 3, 7, 1, 3, 7, 1, 3, 7, 1, 3];
+  // Ponderadores oficiales BCRA: 3-9-7-1 cíclico (patrón "3971397139713")
+  const b2w = [3, 9, 7, 1, 3, 9, 7, 1, 3, 9, 7, 1, 3];
   let b2sum = 0;
   for (let i = 0; i < 13; i++) b2sum += b2[i] * b2w[i];
   const b2check = (10 - (b2sum % 10)) % 10;

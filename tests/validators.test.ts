@@ -135,8 +135,10 @@ describe('backward compat aliases', () => {
 // ---------------------------------------------------------------------------
 
 describe('validateCBU', () => {
-  // CBU válido de ejemplo: Banco Nación, sucursal 599
-  const validCBU = '0110599140000041817221';
+  // CBU válido de ejemplo: Banco Nación (011), sucursal 0599.
+  // Dígitos verificadores calculados con los ponderadores oficiales BCRA
+  // (bloque 1: 7139713 -> 5, bloque 2: 3971397139713 -> 1).
+  const validCBU = '0110599500000041817221';
 
   it('validates a correct CBU', () => {
     expect(validateCBU(validCBU)).toBe(validCBU);
@@ -152,18 +154,19 @@ describe('validateCBU', () => {
   });
 
   it('throws on bad block 1 checksum', () => {
-    expect(() => validateCBU('0110599040000041817221')).toThrow(/bloque 1/);
+    // Block 1 verificador alterado (6 en vez de 5)
+    expect(() => validateCBU('0110599600000041817221')).toThrow(/bloque 1/);
   });
 
   it('throws on bad block 2 checksum', () => {
-    // Block 1 valid (01105991), block 2 last digit changed
-    expect(() => validateCBU('0110599140000041817229')).toThrow(/bloque 2/);
+    // Block 1 válido (01105995), block 2 último dígito alterado (2 en vez de 1)
+    expect(() => validateCBU('0110599500000041817222')).toThrow(/bloque 2/);
   });
 });
 
 describe('isValidCBU', () => {
   it('returns true for valid CBU', () => {
-    expect(isValidCBU('0110599140000041817221')).toBe(true);
+    expect(isValidCBU('0110599500000041817221')).toBe(true);
   });
 
   it('returns false for invalid CBU', () => {
