@@ -168,3 +168,30 @@ describe('anySignal', async () => {
     expect(combined.reason).toBe('chau');
   });
 });
+
+describe('soapCall: regresiones', () => {
+  it('un onEvent que lanza no convierte una respuesta exitosa en error', async () => {
+    mockFetch(xmlResponse(OK));
+    const parsed = await soapCall(URL, '<x/>', {
+      kind: 'emision',
+      onEvent: () => {
+        throw new Error('logger roto');
+      },
+    });
+    expect(parsed).toHaveProperty('Envelope');
+  });
+
+  it('una respuesta 200 cortada a mitad del body se reintenta en consultas', async () => {
+    const cortada = new Response(
+      new ReadableStream({
+        start(c) {
+          c.error(new Error('conexión cortada'));
+        },
+      }),
+      { status: 200 },
+    );
+    const fetch = mockFetch(cortada, xmlResponse(OK));
+    await soapCall(URL, '<x/>', { retries: 1, retryDelayMs: 1 });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+});
