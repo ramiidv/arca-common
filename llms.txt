@@ -65,7 +65,7 @@ const wsaa = new WsaaClient({
 
 Methods:
 - `getAccessTicket(service: string, opts?: { signal?: AbortSignal }): Promise<AccessTicket>` — memory -> storage -> login (deduped)
-- `clearTicket(service: string): Promise<void>` — invalidate ticket (memory + storage)
+- `clearTicket(service: string): Promise<void>` — invalidate ticket (memory + storage). WARNING: WSAA won't issue a new ticket while the old one is valid, so clearing a valid ticket locks you out until it expires.
 - `clearAllTickets(): Promise<void>` — invalidate all tickets known by this client
 - `ticketKey(service: string): string` — storage key: "{prod|homo}:{certFingerprint}:{service}"
 - `clockOffsetMs: number` (getter), `now(): Date` — ARCA clock
@@ -73,6 +73,7 @@ Methods:
 Token caching: memory first, then `ticketStorage`, then login. A 2-minute safety margin is applied before expiry. Concurrent logins for the same service are deduplicated. After a login, the ticket is persisted.
 WSAA rejects a login if a valid TA already exists for the cert+service ("coe.alreadyAuthenticated"). If that happens and the storage has no ticket (re-read once), `ArcaTicketVigenteError` is thrown: the TA cannot be recovered, wait until it expires (up to 12h).
 Storage errors never break the operation; they emit `auth:storage-error`.
+Within the last 2 minutes before expiry the client tries to renew; if WSAA answers alreadyAuthenticated, it keeps using the current ticket until its real expiration (no error).
 Clock skew: if WSAA rejects the TRA because of generationTime/expirationTime and `autoClockSkew` is on, the offset is computed from the response `Date` header, login is retried once and `auth:clock-skew` is emitted.
 
 ### MemoryTicketStorage / FileTicketStorage
@@ -123,7 +124,9 @@ class ArcaValidationError extends ArcaError {
 
 ```typescript
 // Low-level SOAP call. Builds envelope, sends via fetch with AbortController timeout,
-// parses XML response. Retries on 5xx and network errors with exponential backoff.
+// parses XML response (namespace prefixes removed). For kind "consulta" (default) retries
+// network errors, timeouts, truncated responses and 5xx without SOAP Fault, with exponential
+// backoff. kind "emision" is never retried. onEvent errors are ignored (never break a call).
 function soapCall(
   endpoint: string,
   bodyContent: string,       // Raw XML to place inside <soapenv:Body>
@@ -381,7 +384,8 @@ try {
     e.aborted;      // true if cancelled via signal
   }
 }
-// All errors have a stable `code` ("ARCA_SOAP_ERROR", "ARCA_TICKET_VIGENTE", ...).
+// All errors have a stable static `code` ("ARCA_SOAP_ERROR", "ARCA_TICKET_VIGENTE", ...), also readable on the instance.
+// Custom subclasses must declare `static readonly code` to take part in cross-copy instanceof.
 // instanceof works across duplicated copies of the package (ESM + CJS builds in the same process).
 ```
 

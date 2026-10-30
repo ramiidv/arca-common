@@ -19,7 +19,9 @@
   con evento `auth:clock-skew`. `wsaa.now()` y `wsaa.clockOffsetMs` exponen el reloj de ARCA.
 - `soapCall` acepta `kind: "consulta" | "emision"` (las emisiones nunca se reintentan) y `signal`.
 - `ArcaSoapError` expone `faultCode`, `faultString`, `responseDate`, `uncertain` y `aborted`.
-- Todos los errores tienen un `code` estable, y `instanceof` funciona entre copias del paquete.
+- Todos los errores tienen un `code` estable (estático en la clase y legible en la instancia), y
+  `instanceof` funciona entre copias del paquete.
+- `safeEmit` para emitir eventos sin que un callback del usuario afecte la operación.
 - `CondicionIva` (movido desde arca-facturacion) y `extractMethodResult`.
 - Eventos `auth:clock-skew` y `auth:storage-error`; `auth:cache-hit` indica `source`.
 - Build dual ESM + CommonJS con `exports` condicional, y smoke test CommonJS/ESM en CI.
@@ -27,6 +29,14 @@
 ### Fixes
 - Los SOAP Faults con HTTP 500 (como los de WSAA) se perdían: el error solo decía `HTTP 500`.
 - `afipSoapCall` no desenvolvía `personaReturn` (Padrón) ni respuestas con prefijo de namespace.
+- Un callback de `onEvent` que lanzaba podía convertir una respuesta recibida en error (y en WSAA,
+  perder el ticket recién obtenido). Ahora los errores de los callbacks se ignoran.
+- En los 2 minutos previos al vencimiento, si WSAA no permite renovar el ticket, se sigue usando el
+  vigente en lugar de fallar con `ArcaTicketVigenteError`.
+- Cancelar `getAccessTicket` con `signal` lanza `ArcaSoapError` (`aborted: true`), no un `DOMException`.
+- Una respuesta 200 cortada a mitad del body se reintenta en consultas.
+- `instanceof` entre copias se basa en el `code` estático de cada clase, no en su nombre (sobrevive a la
+  minificación).
 
 ## 0.1.0 (2026-03-31)
 
