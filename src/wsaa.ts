@@ -1,13 +1,17 @@
 import { createHash } from 'node:crypto';
 import forge from 'node-forge';
 import { ArcaAuthError, ArcaSoapError, ArcaTicketVigenteError } from './errors.js';
-import { soapCall, parseXml, buildXml, getNestedValue } from './soap-client.js';
+import { soapCall, parseXml, buildXml, extractMethodResult, safeEmit, abortedBeforeSend } from './soap-client.js';
 import { normalizeAccessTicket } from './ticket-storage.js';
 import type { AccessTicket, ArcaEvent, CallOptions, SoapCallOptions, TicketStorage } from './types.js';
 import { WSAA_ENDPOINTS, WSAA_NAMESPACE } from './constants.js';
 
 /** Margen de seguridad antes de considerar un token expirado (2 minutos). */
 const EXPIRY_MARGIN_MS = 2 * 60_000;
+/** Antigüedad del `generationTime` del TRA, para tolerar relojes levemente adelantados. */
+const TRA_GENERATION_OFFSET_MS = 2 * 60_000;
+/** Vida por defecto del ticket solicitado (12 horas, el máximo habitual de WSAA). */
+const DEFAULT_TOKEN_TTL_MINUTES = 720;
 
 export interface WsaaClientConfig {
   /** Certificado X.509 en formato PEM */
@@ -68,13 +72,19 @@ export class WsaaClient {
 
   private readonly ticketCache = new Map<string, AccessTicket>();
   private readonly pendingLogins = new Map<string, Promise<AccessTicket>>();
+  /**
+   * Servicios para los que WSAA rechazó un login nuevo (alreadyAuthenticated)
+   * mientras el ticket actual seguía vigente: hasta que venza, se usa ese
+   * ticket en lugar de reintentar el login.
+   */
+  private readonly loginBlockedUntil = new Map<string, number>();
 
   constructor(config: WsaaClientConfig) {
     this.cert = config.cert;
     this.key = config.key;
     this.endpoint = config.endpoint
       ?? (config.production ? WSAA_ENDPOINTS.production : WSAA_ENDPOINTS.testing);
-    this.tokenTTLMinutes = config.tokenTTLMinutes ?? 720;
+    this.tokenTTLMinutes = config.tokenTTLMinutes ?? DEFAULT_TOKEN_TTL_MINUTES;
     this.onEvent = config.onEvent;
     this.storage = config.ticketStorage;
     this.autoClockSkew = config.autoClockSkew ?? true;
@@ -114,8 +124,8 @@ export class WsaaClient {
    */
   async getAccessTicket(service: string, opts?: CallOptions): Promise<AccessTicket> {
     const cached = this.ticketCache.get(service);
-    if (cached && this.isTicketValid(cached)) {
-      this.onEvent?.({ type: 'auth:cache-hit', service, source: 'memory' });
+    if (cached && (this.isTicketValid(cached) || this.isLoginBlocked(service, cached))) {
+      safeEmit(this.onEvent, { type: 'auth:cache-hit', service, source: 'memory' });
       return cached;
     }
 
@@ -126,7 +136,7 @@ export class WsaaClient {
       });
       this.pendingLogins.set(service, pending);
     }
-    return raceWithSignal(pending, opts?.signal);
+    return raceWithSignal(pending, opts?.signal, (reason) => abortedBeforeSend('getAccessTicket', reason));
   }
 
   /**
@@ -134,6 +144,7 @@ export class WsaaClient {
    */
   async clearTicket(service: string): Promise<void> {
     this.ticketCache.delete(service);
+    this.loginBlockedUntil.delete(service);
     await this.deleteFromStorage(service);
   }
 
@@ -144,6 +155,7 @@ export class WsaaClient {
   async clearAllTickets(): Promise<void> {
     const services = [...this.ticketCache.keys()];
     this.ticketCache.clear();
+    this.loginBlockedUntil.clear();
     await Promise.all(services.map((s) => this.deleteFromStorage(s)));
   }
 
@@ -151,30 +163,57 @@ export class WsaaClient {
   // Private
   // -------------------------------------------------------------------------
 
+  /** Vigente con margen: se usa sin intentar renovarlo. */
   private isTicketValid(ticket: AccessTicket): boolean {
+    return this.msToExpiry(ticket) > EXPIRY_MARGIN_MS;
+  }
+
+  /** Todavía no venció (sin margen): WSAA lo sigue aceptando. */
+  private isTicketUsable(ticket: AccessTicket): boolean {
+    return this.msToExpiry(ticket) > 0;
+  }
+
+  private msToExpiry(ticket: AccessTicket): number {
     const expires = Date.parse(ticket.expirationTime);
-    return Number.isFinite(expires) && expires - this.now().getTime() > EXPIRY_MARGIN_MS;
+    return Number.isFinite(expires) ? expires - this.now().getTime() : -Infinity;
+  }
+
+  private isLoginBlocked(service: string, ticket: AccessTicket): boolean {
+    const until = this.loginBlockedUntil.get(service);
+    return until !== undefined && until > Date.now() && this.isTicketUsable(ticket);
   }
 
   private async resolveTicket(service: string): Promise<AccessTicket> {
     const stored = await this.readFromStorage(service);
     if (stored && this.isTicketValid(stored)) {
       this.ticketCache.set(service, stored);
-      this.onEvent?.({ type: 'auth:cache-hit', service, source: 'storage' });
+      safeEmit(this.onEvent, { type: 'auth:cache-hit', service, source: 'storage' });
       return stored;
     }
+
+    // Ticket por vencer (dentro del margen): se intenta renovar, pero si WSAA
+    // todavía no lo permite se sigue usando hasta su vencimiento real.
+    const expiring = [this.ticketCache.get(service), stored].find(
+      (t): t is AccessTicket => t != null && this.isTicketUsable(t),
+    );
 
     let ticket: AccessTicket;
     try {
       ticket = await this.loginWithClockSkew(service);
     } catch (error) {
       if (isAlreadyAuthenticated(error)) {
-        // Otro proceso pudo haber guardado el ticket mientras nos logueábamos.
+        // Otro proceso pudo haber guardado un ticket nuevo mientras nos logueábamos.
         const again = await this.readFromStorage(service);
-        if (again && this.isTicketValid(again)) {
-          this.ticketCache.set(service, again);
-          this.onEvent?.({ type: 'auth:cache-hit', service, source: 'storage' });
-          return again;
+        const usable = [again, expiring].find(
+          (t): t is AccessTicket => t != null && this.isTicketUsable(t),
+        );
+        if (usable) {
+          this.ticketCache.set(service, usable);
+          if (!this.isTicketValid(usable)) {
+            this.loginBlockedUntil.set(service, Date.now() + this.msToExpiry(usable));
+          }
+          safeEmit(this.onEvent, { type: 'auth:cache-hit', service, source: usable === again ? 'storage' : 'memory' });
+          return usable;
         }
         throw new ArcaTicketVigenteError(service, { cause: error });
       }
@@ -184,6 +223,7 @@ export class WsaaClient {
     }
 
     this.ticketCache.set(service, ticket);
+    this.loginBlockedUntil.delete(service);
     await this.writeToStorage(service, ticket);
     return ticket;
   }
@@ -198,7 +238,7 @@ export class WsaaClient {
 
       const previousOffsetMs = this.offsetMs;
       this.offsetMs = responseDate.getTime() - Date.now();
-      this.onEvent?.({ type: 'auth:clock-skew', service, offsetMs: this.offsetMs, previousOffsetMs });
+      safeEmit(this.onEvent, { type: 'auth:clock-skew', service, offsetMs: this.offsetMs, previousOffsetMs });
       return this.performLogin(service);
     }
   }
@@ -223,7 +263,7 @@ export class WsaaClient {
     const ticket = this.parseLoginResponse(parsed);
     ticket.service = service;
 
-    this.onEvent?.({
+    safeEmit(this.onEvent, {
       type: 'auth:login',
       service,
       durationMs: Date.now() - start,
@@ -262,7 +302,7 @@ export class WsaaClient {
   }
 
   private emitStorageError(service: string, operation: 'get' | 'set' | 'delete', error: unknown): void {
-    this.onEvent?.({
+    safeEmit(this.onEvent, {
       type: 'auth:storage-error',
       service,
       operation,
@@ -271,49 +311,12 @@ export class WsaaClient {
   }
 
   private parseLoginResponse(parsed: Record<string, unknown>): AccessTicket {
-    const envelope = getNestedValue(
-      parsed,
-      'soapenv:Envelope', 'soap:Envelope', 'Envelope', 'S:Envelope',
-    ) as Record<string, unknown> | undefined;
-    if (!envelope) {
-      throw new ArcaAuthError('Respuesta WSAA inválida: falta Envelope');
-    }
-
-    const body = getNestedValue(
-      envelope,
-      'soapenv:Body', 'soap:Body', 'Body', 'S:Body',
-    ) as Record<string, unknown> | undefined;
-    if (!body) {
-      throw new ArcaAuthError('Respuesta WSAA inválida: falta Body');
-    }
-
-    // Verificar fault
-    const fault = getNestedValue(
-      body,
-      'soapenv:Fault', 'soap:Fault', 'Fault', 'S:Fault',
-    ) as Record<string, unknown> | undefined;
-    if (fault) {
-      const faultString = String(fault['faultstring'] ?? fault['faultString'] ?? 'Fault WSAA desconocido');
-      const faultCode = fault['faultcode'] !== undefined ? String(fault['faultcode']) : undefined;
-      throw new ArcaSoapError(`WSAA Fault: ${faultString}`, { faultCode, faultString });
-    }
-
-    const loginResponse = getNestedValue(
-      body,
-      'loginCmsResponse', 'ns2:loginCmsResponse',
-    ) as Record<string, unknown> | undefined;
-    if (!loginResponse) {
-      throw new ArcaAuthError('Respuesta WSAA inválida: falta loginCmsResponse');
-    }
-
-    const loginReturn = getNestedValue(
-      loginResponse,
-      'loginCmsReturn', 'ns2:loginCmsReturn', 'return',
-    ) as string | undefined;
-    if (!loginReturn) {
+    // Los Faults (HTTP 500 o 200) se lanzan como ArcaSoapError con faultCode/faultString.
+    const response = extractMethodResult(parsed, 'loginCms');
+    const loginReturn = response['loginCmsReturn'] ?? response['return'];
+    if (typeof loginReturn !== 'string' || !loginReturn) {
       throw new ArcaAuthError('Respuesta WSAA inválida: falta loginCmsReturn');
     }
-
     return this.parseAccessTicket(loginReturn);
   }
 
@@ -357,7 +360,7 @@ export class WsaaClient {
   private createTRA(service: string): string {
     const now = this.now();
     const uniqueId = Math.floor(now.getTime() / 1000);
-    const generationTime = new Date(now.getTime() - 120_000).toISOString();
+    const generationTime = new Date(now.getTime() - TRA_GENERATION_OFFSET_MS).toISOString();
     const expirationTime = new Date(
       now.getTime() + this.tokenTTLMinutes * 60_000,
     ).toISOString();
@@ -444,11 +447,15 @@ function isClockSkewError(error: unknown): boolean {
   return /generationTime|expirationTime/i.test(faultText(error));
 }
 
-function raceWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+function raceWithSignal<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+  toError: (reason: unknown) => Error,
+): Promise<T> {
   if (!signal) return promise;
-  if (signal.aborted) return Promise.reject(signal.reason);
+  if (signal.aborted) return Promise.reject(toError(signal.reason));
   return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason);
+    const onAbort = () => reject(toError(signal.reason));
     signal.addEventListener('abort', onAbort, { once: true });
     promise.then(
       (value) => {
