@@ -1,12 +1,12 @@
 import { XMLParser, XMLBuilder } from 'fast-xml-parser';
 import { ArcaSoapError, ArcaServiceError } from './errors.js';
-import type { SoapCallOptions } from './types.js';
+import type { ArcaEvent, SoapCallOptions } from './types.js';
 
 // ---------------------------------------------------------------------------
 // XML helpers
 // ---------------------------------------------------------------------------
 
-const xmlParser = new XMLParser({
+const PARSER_OPTIONS = {
   ignoreAttributes: false,
   attributeNamePrefix: '@_',
   textNodeName: '#text',
@@ -15,9 +15,12 @@ const xmlParser = new XMLParser({
   numberParseOptions: {
     hex: false,
     leadingZeros: false,
+    // CUIT, CAE, fechas YYYYMMDD y similares quedan como string.
     skipLike: /^\d{8,}$/,
   },
-});
+};
+
+const xmlParser = new XMLParser(PARSER_OPTIONS);
 
 const xmlBuilder = new XMLBuilder({
   ignoreAttributes: false,
@@ -70,19 +73,20 @@ export function getNestedValue(obj: Record<string, unknown>, ...keys: string[]):
  * namespace (`ns2:getPersonaResponse` → `getPersonaResponse`), porque cada
  * servidor de ARCA usa prefijos distintos para los mismos elementos.
  */
-const soapResponseParser = new XMLParser({
-  ignoreAttributes: false,
-  attributeNamePrefix: '@_',
-  textNodeName: '#text',
-  parseTagValue: true,
-  trimValues: true,
-  removeNSPrefix: true,
-  numberParseOptions: {
-    hex: false,
-    leadingZeros: false,
-    skipLike: /^\d{8,}$/,
-  },
-});
+const soapResponseParser = new XMLParser({ ...PARSER_OPTIONS, removeNSPrefix: true });
+
+/**
+ * Emite un evento sin que un error del callback del usuario afecte la
+ * operación (una respuesta recibida nunca debe convertirse en error por un
+ * logger que falla).
+ */
+export function safeEmit(onEvent: ((event: ArcaEvent) => void) | undefined, event: ArcaEvent): void {
+  try {
+    onEvent?.(event);
+  } catch {
+    // Ignorado a propósito.
+  }
+}
 
 /**
  * Códigos de error de red que garantizan que el request no llegó al servidor
@@ -144,14 +148,15 @@ function parseResponseDate(header: string | null): Date | undefined {
 
 /**
  * Un error es reintentable (solo en consultas) si es transitorio: red, timeout,
- * o un 5xx sin SOAP Fault (502/503/504 de un proxy). Un SOAP Fault es una
- * respuesta determinística del servicio y no se reintenta.
+ * respuesta cortada o ilegible, o un 5xx sin SOAP Fault (502/503/504 de un
+ * proxy). Un SOAP Fault es una respuesta determinística del servicio y un 4xx
+ * un rechazo del request: no se reintentan.
  */
 function isRetryable(error: ArcaSoapError): boolean {
   if (error.aborted) return false;
   if (error.faultString !== undefined) return false;
-  if (error.statusCode !== undefined) return error.statusCode >= 500;
-  return true;
+  const status = error.statusCode;
+  return status === undefined || status < 400 || status >= 500;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -217,15 +222,15 @@ export async function soapCall(
 
   let lastError: ArcaSoapError | undefined;
 
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    if (attempt > 0) {
+  for (let attempt = 0; ; attempt++) {
+    if (lastError) {
       const delay = baseDelay * Math.pow(2, attempt - 1);
-      onEvent?.({
+      safeEmit(onEvent, {
         type: 'request:retry',
         endpoint,
         method: methodName,
         attempt,
-        error: lastError!,
+        error: lastError,
       });
       try {
         await sleep(delay, externalSignal);
@@ -245,11 +250,9 @@ export async function soapCall(
     lastError = error;
     if (attempt < maxRetries && isRetryable(error)) continue;
 
-    onEvent?.({ type: 'request:error', endpoint, method: methodName, error });
+    safeEmit(onEvent, { type: 'request:error', endpoint, method: methodName, error });
     throw error;
   }
-
-  throw lastError ?? new ArcaSoapError('Error SOAP desconocido');
 
   /** Devuelve la respuesta parseada, o el error (sin lanzarlo) para decidir el reintento. */
   async function attemptOnce(): Promise<Record<string, unknown> | ArcaSoapError> {
@@ -263,7 +266,7 @@ export async function soapCall(
     externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
 
     const startTime = Date.now();
-    onEvent?.({ type: 'request:start', endpoint, method: methodName });
+    safeEmit(onEvent, { type: 'request:start', endpoint, method: methodName });
 
     try {
       let response: Response;
@@ -324,7 +327,7 @@ export async function soapCall(
         });
       }
 
-      onEvent?.({ type: 'request:end', endpoint, method: methodName, durationMs: Date.now() - startTime });
+      safeEmit(onEvent, { type: 'request:end', endpoint, method: methodName, durationMs: Date.now() - startTime });
       return parsed;
     } finally {
       clearTimeout(timer);
@@ -355,7 +358,8 @@ export async function soapCall(
   }
 }
 
-function abortedBeforeSend(methodName: string, reason: unknown): ArcaSoapError {
+/** Error para una llamada cancelada por el caller antes de enviarse (no se procesó nada). */
+export function abortedBeforeSend(methodName: string, reason: unknown): ArcaSoapError {
   return new ArcaSoapError(`Llamada a ${methodName} abortada antes de enviarse`, {
     cause: reason,
     uncertain: false,

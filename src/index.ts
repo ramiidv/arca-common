@@ -44,6 +44,7 @@ export {
   soapCall,
   afipSoapCall,
   extractMethodResult,
+  safeEmit,
   checkServiceErrors,
 } from './soap-client.js';
 
