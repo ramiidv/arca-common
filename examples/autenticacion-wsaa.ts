@@ -5,12 +5,15 @@
  * web service de ARCA usando el WsaaClient.
  */
 import fs from "fs";
-import { WsaaClient } from "@ramiidv/arca-common";
+import { WsaaClient, FileTicketStorage } from "@ramiidv/arca-common";
 
 const wsaa = new WsaaClient({
   cert: fs.readFileSync("./cert.pem", "utf-8"),
   key: fs.readFileSync("./key.pem", "utf-8"),
   production: false,
+  // Persistir el ticket: sin esto, al reiniciar el proceso WSAA rechaza el login
+  // ("ya posee un TA válido") hasta que el ticket anterior venza.
+  ticketStorage: new FileTicketStorage("./.arca-tickets"),
   // Opcional:
   // timeout: 30_000,
   // retries: 2,
@@ -23,7 +26,7 @@ async function main() {
   const ticket = await wsaa.getAccessTicket("wsfe");
   console.log("Token:", ticket.token.slice(0, 40) + "...");
   console.log("Sign:", ticket.sign.slice(0, 40) + "...");
-  console.log("Expira:", ticket.expirationTime.toISOString());
+  console.log("Expira:", ticket.expirationTime); // string ISO
 
   // Segunda llamada — devuelve el ticket cacheado (no hace login de nuevo)
   const ticket2 = await wsaa.getAccessTicket("wsfe");
@@ -34,8 +37,8 @@ async function main() {
   console.log("Token padrón:", ticketPadron.token.slice(0, 40) + "...");
 
   // Invalidar cache si es necesario (ej: después de renovar certificado)
-  wsaa.clearTicket("wsfe");
-  wsaa.clearAllTickets();
+  await wsaa.clearTicket("wsfe");
+  await wsaa.clearAllTickets();
 }
 
 main().catch(console.error);
