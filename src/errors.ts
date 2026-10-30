@@ -1,40 +1,53 @@
 /**
- * Marca que llevan todas las instancias de errores de los SDKs de ARCA.
- * Se usa `Symbol.for` para que la marca sea la misma aunque haya más de una
- * copia del paquete cargada (ej: build ESM y CJS en el mismo proceso, o dos
- * versiones en node_modules). Así `instanceof` funciona entre copias.
+ * Marca que llevan todas las instancias de errores de los SDKs de ARCA: la
+ * lista de `code` de su cadena de clases. Se usa `Symbol.for` para que la marca
+ * sea la misma aunque haya más de una copia del paquete cargada (build ESM y
+ * CJS en el mismo proceso, o dos versiones en node_modules), y se basa en los
+ * `code` (no en el nombre de la clase) para sobrevivir a la minificación.
  */
 const ERROR_KINDS = Symbol.for('@ramiidv/arca-common:error-kinds');
+
+/** `code` propio de una clase de error (no heredado), si lo declara. */
+function ownCode(ctor: unknown): string | undefined {
+  return typeof ctor === 'function' && Object.prototype.hasOwnProperty.call(ctor, 'code')
+    ? (ctor as unknown as { code: string }).code
+    : undefined;
+}
 
 /**
  * Error base para todos los errores de los SDKs de ARCA.
  *
- * Todas las subclases tienen un `code` estable (ej: `"ARCA_AUTH_ERROR"`) que se
- * puede persistir o comparar sin depender de `instanceof`.
+ * Cada clase declara un `code` estático y estable (ej: `"ARCA_AUTH_ERROR"`),
+ * disponible también en la instancia, que se puede persistir o comparar sin
+ * depender de `instanceof`. Las subclases propias deben declarar su
+ * `static readonly code` para participar del `instanceof` entre copias.
  */
 export class ArcaError extends Error {
-  public readonly code: string = 'ARCA_ERROR';
+  static readonly code: string = 'ARCA_ERROR';
 
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
     this.name = 'ArcaError';
 
-    // Registra la cadena de clases (ArcaAuthError, ArcaError, ...) para que
-    // `instanceof` funcione entre copias distintas del paquete.
     const kinds: string[] = [];
-    let ctor: unknown = new.target;
-    while (typeof ctor === 'function' && ctor !== Error) {
-      kinds.push((ctor as { name: string }).name);
-      ctor = Object.getPrototypeOf(ctor);
+    for (let ctor: unknown = new.target; typeof ctor === 'function' && ctor !== Error; ctor = Object.getPrototypeOf(ctor)) {
+      const code = ownCode(ctor);
+      if (code) kinds.push(code);
     }
     Object.defineProperty(this, ERROR_KINDS, { value: kinds, enumerable: false });
   }
 
+  /** Código estable del error (el de su clase). */
+  get code(): string {
+    return (this.constructor as typeof ArcaError).code;
+  }
+
   static [Symbol.hasInstance](value: unknown): boolean {
     if (Function.prototype[Symbol.hasInstance].call(this, value)) return true;
-    if (typeof value !== 'object' || value === null) return false;
+    const code = ownCode(this);
+    if (!code || typeof value !== 'object' || value === null) return false;
     const kinds = (value as Record<symbol, unknown>)[ERROR_KINDS];
-    return Array.isArray(kinds) && kinds.includes(this.name);
+    return Array.isArray(kinds) && kinds.includes(code);
   }
 }
 
@@ -43,7 +56,7 @@ export class ArcaError extends Error {
  * Se lanza cuando falla el login, el certificado es inválido, o la respuesta de WSAA es inesperada.
  */
 export class ArcaAuthError extends ArcaError {
-  public override readonly code: string = 'ARCA_AUTH_ERROR';
+  static override readonly code: string = 'ARCA_AUTH_ERROR';
 
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
@@ -62,7 +75,7 @@ export class ArcaAuthError extends ArcaError {
  * emite con vigencia de hasta 12 horas) o usar otro certificado.
  */
 export class ArcaTicketVigenteError extends ArcaAuthError {
-  public override readonly code: string = 'ARCA_TICKET_VIGENTE';
+  static override readonly code: string = 'ARCA_TICKET_VIGENTE';
   public readonly service: string;
 
   constructor(service: string, options?: { cause?: unknown }) {
@@ -104,7 +117,7 @@ export interface ArcaSoapErrorOptions {
  * Se lanza cuando el request HTTP falla, hay un timeout, o se recibe un SOAP Fault.
  */
 export class ArcaSoapError extends ArcaError {
-  public override readonly code: string = 'ARCA_SOAP_ERROR';
+  static override readonly code: string = 'ARCA_SOAP_ERROR';
   public readonly statusCode?: number;
   public readonly faultCode?: string;
   public readonly faultString?: string;
@@ -134,7 +147,7 @@ export class ArcaSoapError extends ArcaError {
  * Contiene el array de errores con código y mensaje tal cual los devuelve ARCA.
  */
 export class ArcaServiceError extends ArcaError {
-  public override readonly code: string = 'ARCA_SERVICE_ERROR';
+  static override readonly code: string = 'ARCA_SERVICE_ERROR';
   public readonly errors: { code: number; msg: string }[];
 
   constructor(message: string, errors: { code: number; msg: string }[]) {
@@ -149,7 +162,7 @@ export class ArcaServiceError extends ArcaError {
  * Se lanza cuando los datos proporcionados no cumplen con el formato esperado.
  */
 export class ArcaValidationError extends ArcaError {
-  public override readonly code: string = 'ARCA_VALIDATION_ERROR';
+  static override readonly code: string = 'ARCA_VALIDATION_ERROR';
   public readonly field?: string;
   public readonly details: ValidationErrorDetail[];
 

@@ -51,3 +51,16 @@ describe('errores', () => {
     expect(null).not.toBeInstanceOf(ArcaError);
   });
 });
+
+describe('errores: code estático', () => {
+  it('el code está en la clase y en la instancia', () => {
+    expect(ArcaSoapError.code).toBe('ARCA_SOAP_ERROR');
+    expect(new ArcaSoapError('x').code).toBe('ARCA_SOAP_ERROR');
+  });
+
+  it('instanceof entre copias no depende del nombre de la clase (minificación)', async () => {
+    const copy = await loadSecondCopy();
+    Object.defineProperty(copy.ArcaAuthError, 'name', { value: 'a' });
+    expect(new copy.ArcaAuthError('x')).toBeInstanceOf(ArcaAuthError);
+  });
+});
