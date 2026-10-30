@@ -58,3 +58,27 @@ export enum Provincia {
   SANTA_CRUZ = 22,
   TIERRA_DEL_FUEGO = 23,
 }
+
+// ---------------------------------------------------------------------------
+// Condición frente al IVA (receptor / emisor)
+// ---------------------------------------------------------------------------
+
+/**
+ * Condición frente al IVA. Valores de `FEParamGetCondicionIvaReceptor` (WSFEv1),
+ * usados en el campo `CondicionIVAReceptorId`.
+ */
+export enum CondicionIva {
+  RESPONSABLE_INSCRIPTO = 1,
+  EXENTO = 4,
+  CONSUMIDOR_FINAL = 5,
+  /** Responsable Monotributo */
+  MONOTRIBUTISTA = 6,
+  NO_CATEGORIZADO = 7,
+  PROVEEDOR_EXTERIOR = 8,
+  CLIENTE_EXTERIOR = 9,
+  /** IVA Liberado – Ley N° 19.640 */
+  IVA_LIBERADO = 10,
+  MONOTRIBUTO_SOCIAL = 13,
+  IVA_NO_ALCANZADO = 15,
+  MONOTRIBUTO_INDEPENDIENTE_PROMOVIDO = 16,
+}
