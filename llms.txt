@@ -57,15 +57,27 @@ const wsaa = new WsaaClient({
   retries?: number,           // Default: 1
   retryDelayMs?: number,      // Default: 1000ms (exponential backoff)
   onEvent?: (event: ArcaEvent) => void,
+  ticketStorage?: TicketStorage, // Persist tickets across restarts (recommended)
+  clockOffsetMs?: number,     // ARCA clock - local clock, in ms. Default: 0
+  autoClockSkew?: boolean,    // Default: true
 });
 ```
 
 Methods:
-- `getAccessTicket(service: string): Promise<AccessTicket>` — get auth ticket (cached + deduped)
-- `clearTicket(service: string): void` — invalidate cached ticket for a service
-- `clearAllTickets(): void` — invalidate all cached tickets
+- `getAccessTicket(service: string, opts?: { signal?: AbortSignal }): Promise<AccessTicket>` — memory -> storage -> login (deduped)
+- `clearTicket(service: string): Promise<void>` — invalidate ticket (memory + storage)
+- `clearAllTickets(): Promise<void>` — invalidate all tickets known by this client
+- `ticketKey(service: string): string` — storage key: "{prod|homo}:{certFingerprint}:{service}"
+- `clockOffsetMs: number` (getter), `now(): Date` — ARCA clock
 
-Token caching: tickets are cached in memory by service name. A 2-minute safety margin is applied before expiry. Concurrent login requests for the same service are deduplicated (only one actual SOAP call).
+Token caching: memory first, then `ticketStorage`, then login. A 2-minute safety margin is applied before expiry. Concurrent logins for the same service are deduplicated. After a login, the ticket is persisted.
+WSAA rejects a login if a valid TA already exists for the cert+service ("coe.alreadyAuthenticated"). If that happens and the storage has no ticket (re-read once), `ArcaTicketVigenteError` is thrown: the TA cannot be recovered, wait until it expires (up to 12h).
+Storage errors never break the operation; they emit `auth:storage-error`.
+Clock skew: if WSAA rejects the TRA because of generationTime/expirationTime and `autoClockSkew` is on, the offset is computed from the response `Date` header, login is retried once and `auth:clock-skew` is emitted.
+
+### MemoryTicketStorage / FileTicketStorage
+
+Reference `TicketStorage` implementations. `new FileTicketStorage(directory)` writes one JSON file per key (mode 0600, atomic rename).
 
 ### Error classes
 
@@ -77,9 +89,17 @@ class ArcaError extends Error { name: "ArcaError" }
 class ArcaAuthError extends ArcaError { name: "ArcaAuthError" }
 // Thrown when: WSAA login fails, certificate is invalid, unexpected WSAA response
 
+class ArcaTicketVigenteError extends ArcaAuthError { name: "ArcaTicketVigenteError"; service: string }
+// Thrown when: WSAA says a valid TA already exists for this cert+service and it is not in memory/storage.
+
 class ArcaSoapError extends ArcaError {
   name: "ArcaSoapError";
-  statusCode?: number;  // HTTP status code if available
+  statusCode?: number;   // HTTP status code if available
+  faultCode?: string;    // SOAP Fault code
+  faultString?: string;  // SOAP Fault message
+  responseDate?: Date;   // server Date header
+  uncertain: boolean;    // server may have processed the request
+  aborted: boolean;      // cancelled via signal
 }
 // Thrown when: HTTP request fails, timeout, SOAP Fault received
 
@@ -199,10 +219,23 @@ function collectErrorsWithPrefix(fn: () => void, errors: ValidationErrorDetail[]
 ## Exported types (types.ts)
 
 ```typescript
+// JSON-serializable as is.
 interface AccessTicket {
   token: string;
   sign: string;
-  expirationTime: Date;
+  expirationTime: string;   // ISO-8601 UTC (ARCA clock)
+  generationTime?: string;  // ISO-8601 UTC
+  service?: string;
+}
+
+interface TicketStorage {
+  get(key: string): Promise<AccessTicket | null>;
+  set(key: string, ticket: AccessTicket): Promise<void>;
+  delete?(key: string): Promise<void>;
+}
+
+interface CallOptions {
+  signal?: AbortSignal;
 }
 
 interface ArcaBaseConfig {
@@ -222,6 +255,8 @@ interface SoapCallOptions {
   soapAction?: string;
   onEvent?: (event: ArcaEvent) => void;
   methodName?: string;                        // For event reporting
+  kind?: "consulta" | "emision";              // Default: "consulta". Emisiones are never retried
+  signal?: AbortSignal;
 }
 
 interface ServerStatus {
@@ -233,7 +268,9 @@ interface ServerStatus {
 // Discriminated union of SDK events
 type ArcaEvent =
   | { type: "auth:login"; service: string; durationMs?: number }
-  | { type: "auth:cache-hit"; service: string }
+  | { type: "auth:cache-hit"; service: string; source?: "memory" | "storage" }
+  | { type: "auth:clock-skew"; service: string; offsetMs: number; previousOffsetMs: number }
+  | { type: "auth:storage-error"; service: string; operation: "get" | "set" | "delete"; error: Error | string }
   | { type: "request:start"; method: string; endpoint: string }
   | { type: "request:end"; method: string; endpoint: string; durationMs: number }
   | { type: "request:retry"; method: string; endpoint: string; attempt: number; error: Error | string }
@@ -249,6 +286,9 @@ interface WsaaClientConfig {
   retries?: number;                           // Default: 1
   retryDelayMs?: number;                      // Default: 1000
   onEvent?: (event: ArcaEvent) => void;
+  ticketStorage?: TicketStorage;
+  clockOffsetMs?: number;                     // Default: 0
+  autoClockSkew?: boolean;                    // Default: true
 }
 
 interface ValidationErrorDetail {
@@ -333,14 +373,26 @@ try {
   }
   if (e instanceof ArcaSoapError) {
     // HTTP/transport error
-    e.statusCode;  // number | undefined
+    e.statusCode;   // number | undefined
+    e.faultCode;    // SOAP Fault code, if any (also for HTTP 500 faults)
+    e.faultString;  // SOAP Fault message, if any
+    e.responseDate; // server Date header, if there was a response
+    e.uncertain;    // true if the server may have processed the request
+    e.aborted;      // true if cancelled via signal
   }
 }
+// All errors have a stable `code` ("ARCA_SOAP_ERROR", "ARCA_TICKET_VIGENTE", ...).
+// instanceof works across duplicated copies of the package (ESM + CJS builds in the same process).
 ```
 
 ## Retry behavior
 
-Enabled by default (`retries: 1`). Retries on: HTTP 5xx, network errors (TypeError from fetch), AbortError (timeout). Does NOT retry on: 4xx, business errors, validation errors. Backoff formula: `retryDelayMs * 2^(attempt-1)`.
+Enabled by default (`retries: 1`) only for `kind: "consulta"` (queries, WSAA login). Retries on: network errors, timeouts, HTTP 5xx without SOAP Fault. Does NOT retry on: SOAP Faults, 4xx, business errors, validation errors, or user aborts. Backoff formula: `retryDelayMs * 2^(attempt-1)`.
+`kind: "emision"` (e.g. FECAESolicitar) is never retried: errors carry `uncertain: true` when the server may have processed the request (timeout, dropped connection, 5xx, unreadable response) and `uncertain: false` when it certainly did not (DNS failure, connection refused, 4xx, aborted before sending).
+
+## Module formats
+
+Published as dual ESM + CommonJS (`exports` with `import`/`require`/`types`). Works with `import` and `require`, including TypeScript `"module": "CommonJS"`.
 
 ## Key domain concepts
 
