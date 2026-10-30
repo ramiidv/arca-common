@@ -85,8 +85,13 @@ export class FileTicketStorage implements TicketStorage {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const target = this.pathFor(key);
     const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(tmp, JSON.stringify(ticket), { mode: 0o600 });
-    await rename(tmp, target);
+    try {
+      await writeFile(tmp, JSON.stringify(ticket), { mode: 0o600 });
+      await rename(tmp, target);
+    } catch (err) {
+      await rm(tmp, { force: true });
+      throw err;
+    }
   }
 
   async delete(key: string): Promise<void> {

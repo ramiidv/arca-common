@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WsaaClient } from '../src/wsaa.js';
 import { FileTicketStorage, MemoryTicketStorage } from '../src/ticket-storage.js';
-import { ArcaAuthError, ArcaTicketVigenteError } from '../src/errors.js';
+import { ArcaAuthError, ArcaSoapError, ArcaTicketVigenteError } from '../src/errors.js';
 import type { ArcaEvent } from '../src/types.js';
 import { loginResponse, mockFetch, soapFault, testCert, xmlResponse } from './helpers.js';
 
@@ -216,5 +216,48 @@ describe('FileTicketStorage', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('WsaaClient: regresiones', () => {
+  const alreadyAuth = () =>
+    xmlResponse(soapFault('ns1:coe.alreadyAuthenticated', 'El CEE ya posee un TA valido para el acceso al WSN solicitado'), 500);
+
+  it('en los 2 minutos previos al vencimiento usa el ticket vigente si WSAA no permite renovarlo', async () => {
+    const storage = new MemoryTicketStorage();
+    const wsaa = client({ ticketStorage: storage });
+    await storage.set(wsaa.ticketKey('wsfe'), {
+      token: 'POR_VENCER',
+      sign: 's',
+      expirationTime: new Date(Date.now() + 90_000).toISOString(),
+    });
+    const fetch = mockFetch(alreadyAuth());
+
+    expect((await wsaa.getAccessTicket('wsfe')).token).toBe('POR_VENCER');
+    // No reintenta el login en cada llamada mientras siga vigente.
+    expect((await wsaa.getAccessTicket('wsfe')).token).toBe('POR_VENCER');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('un callback onEvent que lanza no hace perder el ticket obtenido', async () => {
+    const storage = new MemoryTicketStorage();
+    mockFetch(xmlResponse(loginResponse('T1', new Date(Date.now() + 12 * HOUR))));
+    const wsaa = client({
+      ticketStorage: storage,
+      onEvent: () => {
+        throw new Error('logger roto');
+      },
+    });
+    expect((await wsaa.getAccessTicket('wsfe')).token).toBe('T1');
+    expect((await storage.get(wsaa.ticketKey('wsfe')))?.token).toBe('T1');
+  });
+
+  it('cancelar la espera lanza ArcaSoapError aborted (no un DOMException)', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    mockFetch(xmlResponse(loginResponse('T1', new Date(Date.now() + 12 * HOUR))));
+    const err = await client().getAccessTicket('wsfe', { signal: controller.signal }).catch((e) => e);
+    expect(err).toBeInstanceOf(ArcaSoapError);
+    expect(err).toMatchObject({ aborted: true, uncertain: false });
   });
 });
