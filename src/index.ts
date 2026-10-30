@@ -8,7 +8,7 @@ export {
   ArcaServiceError,
   ArcaValidationError,
 } from './errors.js';
-export type { ValidationErrorDetail } from './errors.js';
+export type { ValidationErrorDetail, ArcaSoapErrorOptions } from './errors.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -17,6 +17,8 @@ export type {
   AccessTicket,
   ArcaBaseConfig,
   SoapCallOptions,
+  SoapOperationKind,
+  CallOptions,
   ServerStatus,
   ArcaEvent,
 } from './types.js';
@@ -37,6 +39,7 @@ export {
   getNestedValue,
   soapCall,
   afipSoapCall,
+  extractMethodResult,
   checkServiceErrors,
 } from './soap-client.js';
 
