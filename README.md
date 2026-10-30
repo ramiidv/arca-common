@@ -81,7 +81,11 @@ no vas a poder loguearte hasta que venza (hasta 12 horas). Para evitarlo, config
 `ticketStorage`:
 
 - Orden de lectura: memoria → storage → login. Despues de un login exitoso, se persiste.
-- `clearTicket` tambien borra del storage.
+- `clearTicket` tambien borra del storage. **Ojo:** WSAA no emite un ticket nuevo mientras el
+  anterior siga vigente, asi que borrar uno vigente te deja sin acceso hasta que venza. Usalo solo
+  si el ticket es invalido (por ejemplo, cambiaste de certificado).
+- En los 2 minutos previos al vencimiento el SDK intenta renovar; si WSAA todavia no lo permite,
+  sigue usando el ticket actual hasta su vencimiento real.
 - Los logins concurrentes se deduplican (incluida la lectura del storage).
 - Si WSAA responde "ya posee un TA valido" y el storage no tiene el ticket (despues de
   releerlo, por si otro proceso lo acaba de guardar), se lanza `ArcaTicketVigenteError`.
@@ -357,9 +361,13 @@ console.log(Provincia.CORDOBA);      // 3
 | `ArcaServiceError` | Error de negocio de ARCA (codigos funcionales) | `errors: { code, msg }[]` |
 | `ArcaValidationError` | Datos de entrada invalidos | `field?: string`, `details: ValidationErrorDetail[]` |
 
+Los callbacks de `onEvent` nunca rompen una llamada: si lanzan, el error se ignora.
+
 Todos los errores tienen un `code` estable (`"ARCA_AUTH_ERROR"`, `"ARCA_TICKET_VIGENTE"`,
 `"ARCA_SOAP_ERROR"`, ...) y `instanceof` funciona aunque haya mas de una copia del paquete
-cargada (por ejemplo, el build ESM y el CJS en el mismo proceso).
+cargada (por ejemplo, el build ESM y el CJS en el mismo proceso). El `code` es estatico en cada clase
+(`ArcaSoapError.code`); si definis subclases propias, declara `static readonly code` para que
+participen del `instanceof` entre copias.
 
 ### Types
 
