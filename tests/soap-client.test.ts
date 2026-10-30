@@ -148,3 +148,23 @@ describe('afipSoapCall', () => {
     });
   });
 });
+
+describe('anySignal', async () => {
+  const { anySignal } = await import('../src/signals.js');
+
+  it('devuelve el único signal presente', () => {
+    const c = new AbortController();
+    expect(anySignal(undefined, c.signal)).toBe(c.signal);
+    expect(anySignal(undefined, undefined)).toBeUndefined();
+  });
+
+  it('se aborta cuando se aborta cualquiera, con su reason', () => {
+    const a = new AbortController();
+    const b = new AbortController();
+    const combined = anySignal(a.signal, b.signal)!;
+    expect(combined.aborted).toBe(false);
+    b.abort('chau');
+    expect(combined.aborted).toBe(true);
+    expect(combined.reason).toBe('chau');
+  });
+});

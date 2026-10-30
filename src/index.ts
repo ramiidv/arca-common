@@ -31,6 +31,7 @@ export type {
 export { WsaaClient } from './wsaa.js';
 export type { WsaaClientConfig } from './wsaa.js';
 export { MemoryTicketStorage, FileTicketStorage, normalizeAccessTicket } from './ticket-storage.js';
+export { anySignal } from './signals.js';
 
 // ---------------------------------------------------------------------------
 // SOAP client
