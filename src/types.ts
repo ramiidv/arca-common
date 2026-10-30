@@ -2,10 +2,41 @@
 // Autenticación
 // ---------------------------------------------------------------------------
 
+/**
+ * Ticket de Acceso (TA) de WSAA.
+ *
+ * Es serializable a JSON tal cual (`JSON.stringify` / `JSON.parse`): las fechas
+ * son strings ISO-8601 en UTC. Se puede guardar en una DB, Redis, un archivo, etc.
+ */
 export interface AccessTicket {
   token: string;
   sign: string;
-  expirationTime: Date;
+  /** Vencimiento del TA (ISO-8601, UTC), según el reloj de WSAA. */
+  expirationTime: string;
+  /** Emisión del TA (ISO-8601, UTC), según el reloj de WSAA. */
+  generationTime?: string;
+  /** Servicio para el que se emitió el TA (ej: "wsfe"). */
+  service?: string;
+}
+
+/**
+ * Almacenamiento persistente de Tickets de Acceso.
+ *
+ * WSAA rechaza un login si ya existe un TA vigente para el mismo certificado y
+ * servicio, así que un proceso que se reinicia necesita recuperar el TA que
+ * obtuvo antes. Implementá esta interfaz sobre tu DB, Redis, archivo, etc.
+ *
+ * La `key` la arma `WsaaClient` e identifica entorno + certificado + servicio
+ * (ej: `"homo:3f9a0c1b2d4e5f60:wsfe"`), así que un mismo storage se puede
+ * compartir entre varios certificados, CUITs y entornos sin que se pisen.
+ *
+ * Los tickets que se guardan son JSON puro. `get` puede devolver un ticket
+ * vencido: el cliente lo descarta.
+ */
+export interface TicketStorage {
+  get(key: string): Promise<AccessTicket | null>;
+  set(key: string, ticket: AccessTicket): Promise<void>;
+  delete?(key: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

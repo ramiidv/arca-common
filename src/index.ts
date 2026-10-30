@@ -7,6 +7,7 @@ export {
   ArcaSoapError,
   ArcaServiceError,
   ArcaValidationError,
+  ArcaTicketVigenteError,
 } from './errors.js';
 export type { ValidationErrorDetail, ArcaSoapErrorOptions } from './errors.js';
 
@@ -15,6 +16,7 @@ export type { ValidationErrorDetail, ArcaSoapErrorOptions } from './errors.js';
 // ---------------------------------------------------------------------------
 export type {
   AccessTicket,
+  TicketStorage,
   ArcaBaseConfig,
   SoapCallOptions,
   SoapOperationKind,
@@ -28,6 +30,7 @@ export type {
 // ---------------------------------------------------------------------------
 export { WsaaClient } from './wsaa.js';
 export type { WsaaClientConfig } from './wsaa.js';
+export { MemoryTicketStorage, FileTicketStorage, normalizeAccessTicket } from './ticket-storage.js';
 
 // ---------------------------------------------------------------------------
 // SOAP client
@@ -77,4 +80,5 @@ export {
   WSAA_NAMESPACE,
   DocTipo,
   Provincia,
+  CondicionIva,
 } from './constants.js';
