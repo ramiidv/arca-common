@@ -64,3 +64,20 @@ describe('errores: code estático', () => {
     expect(new copy.ArcaAuthError('x')).toBeInstanceOf(ArcaAuthError);
   });
 });
+
+describe('cause en ArcaServiceError y ArcaValidationError', async () => {
+  const { ArcaServiceError } = await import('../src/errors.js');
+
+  it('aceptan cause opcional manteniendo la firma anterior', () => {
+    const root = new Error('raíz');
+    const svc = new ArcaServiceError('x', [{ code: 1, msg: 'm' }], { cause: root });
+    expect(svc.cause).toBe(root);
+    expect(svc.errors).toEqual([{ code: 1, msg: 'm' }]);
+    expect(new ArcaServiceError('x', []).cause).toBeUndefined();
+
+    const val = new ArcaValidationError('x', [], 'campo', { cause: root });
+    expect(val.cause).toBe(root);
+    expect(val.field).toBe('campo');
+    expect(new ArcaValidationError('x', []).field).toBeUndefined();
+  });
+});

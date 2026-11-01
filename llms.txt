@@ -60,6 +60,9 @@ const wsaa = new WsaaClient({
   ticketStorage?: TicketStorage, // Persist tickets across restarts (recommended)
   clockOffsetMs?: number,     // ARCA clock - local clock, in ms. Default: 0
   autoClockSkew?: boolean,    // Default: true
+  loginErrorCooldownMs?: number, // Default: 60000. 0 disables
+  fetch?: typeof fetch,       // Custom fetch. Default: globalThis.fetch
+  legacyTls?: "auto" | "never" | "always", // Default: "auto"
 });
 ```
 
@@ -71,14 +74,17 @@ Methods:
 - `clockOffsetMs: number` (getter), `now(): Date` — ARCA clock
 
 Token caching: memory first, then `ticketStorage`, then login. A 2-minute safety margin is applied before expiry. Concurrent logins for the same service are deduplicated. After a login, the ticket is persisted.
-WSAA rejects a login if a valid TA already exists for the cert+service ("coe.alreadyAuthenticated"). If that happens and the storage has no ticket (re-read once), `ArcaTicketVigenteError` is thrown: the TA cannot be recovered, wait until it expires (up to 12h).
+WSAA rejects a login if a valid TA already exists for the cert+service ("coe.alreadyAuthenticated"). If that happens and the storage has no ticket (re-read up to 3 times, at 0/250/750 ms, in case another process is saving it), `ArcaTicketVigenteError` is thrown: the TA cannot be recovered, wait until it expires (up to 12h).
 Storage errors never break the operation; they emit `auth:storage-error`.
 Within the last 2 minutes before expiry the client tries to renew; if WSAA answers alreadyAuthenticated, it keeps using the current ticket until its real expiration (no error).
-Clock skew: if WSAA rejects the TRA because of generationTime/expirationTime and `autoClockSkew` is on, the offset is computed from the response `Date` header, login is retried once and `auth:clock-skew` is emitted.
+Clock skew: if WSAA rejects the TRA with `xml.generationTime.invalid` or `xml.expirationTime.expired` and `autoClockSkew` is on, the offset is computed from the response `Date` header, login is retried once and `auth:clock-skew` is emitted. `xml.expirationTime.invalid` (requested validity > 24h) is a configuration error, not clock skew.
+Login error cooldown: after a failed login (except alreadyAuthenticated, clock skew, abort, or network error where the request was not sent), `getAccessTicket` for that service rejects immediately with `ArcaAuthError` (`cause` = original error) without calling WSAA for `loginErrorCooldownMs` (default 60000; 0 disables), as the WSAA spec requires. `clearTicket`/`clearAllTickets` reset it.
+Secrets: cert, key and cached tickets are ES private fields (`#`): they never show up in `JSON.stringify` or `util.inspect`.
+TRA `uniqueId` is a random 32-bit unsigned int (xsd:unsignedInt), so TRAs generated in the same second don't collide.
 
 ### MemoryTicketStorage / FileTicketStorage
 
-Reference `TicketStorage` implementations. `new FileTicketStorage(directory)` writes one JSON file per key (mode 0600, atomic rename).
+Reference `TicketStorage` implementations. `new FileTicketStorage(directory)` writes one JSON file per key (mode 0600; temp file with random UUID name + fsync + atomic rename; an existing directory owned by the current user is chmod'ed to 0700, best effort). A corrupted JSON file is deleted and `get` returns null, reporting it through `options.onError` (WsaaClient emits `auth:storage-error` with operation "get").
 
 ### Error classes
 
@@ -106,7 +112,8 @@ class ArcaSoapError extends ArcaError {
 
 class ArcaServiceError extends ArcaError {
   name: "ArcaServiceError";
-  errors: { code: number; msg: string }[];
+  errors: { code: number; msg: string; rawCode?: string }[]; // rawCode: original non-numeric code (code = 0)
+  constructor(message: string, errors: ServiceErrorDetail[], options?: { cause?: unknown });
 }
 // Thrown when: ARCA web service returns business errors (e.g. invalid CUIT, rejected invoice)
 
@@ -114,6 +121,7 @@ class ArcaValidationError extends ArcaError {
   name: "ArcaValidationError";
   field?: string;
   details: ValidationErrorDetail[];  // { field: string; message: string; value?: unknown }
+  constructor(message: string, details: ValidationErrorDetail[], field?: string, options?: { cause?: unknown });
 }
 // Thrown when: input data fails validation (invalid CUIL format, bad CBU checksum, etc.)
 ```
@@ -127,6 +135,12 @@ class ArcaValidationError extends ArcaError {
 // parses XML response (namespace prefixes removed). For kind "consulta" (default) retries
 // network errors, timeouts, truncated responses and 5xx without SOAP Fault, with exponential
 // backoff. kind "emision" is never retried. onEvent errors are ignored (never break a call).
+// SOAP Faults are thrown as ArcaSoapError whether they come with HTTP 500 or 200
+// (uncertain: false in "consulta", true in "emision"). A 2xx response without a SOAP Envelope
+// (e.g. an HTML maintenance page) is a transport error: retried in "consulta", uncertain in "emision".
+// If the default fetch fails with ERR_SSL_DH_KEY_TOO_SMALL (servicios1.afip.gov.ar uses 1024-bit DH),
+// the same request is retried once over node:https with ciphers "DEFAULT@SECLEVEL=1" (safe even for
+// emisiones: the handshake failed, nothing was sent) and the host is remembered (legacyTls: "auto").
 function soapCall(
   endpoint: string,
   bodyContent: string,       // Raw XML to place inside <soapenv:Body>
@@ -134,20 +148,41 @@ function soapCall(
 ): Promise<Record<string, unknown>>;
 
 // High-level SOAP call for ARCA web services.
-// Builds namespaced method body, sets SOAPAction, calls soapCall,
-// extracts {method}Response/{method}Result from the response.
+// Builds the method body, sets SOAPAction, calls soapCall,
+// extracts {responseElement} and unwraps {method}Result / {method}Return / return / single *Return|*Result.
 // Detects SOAP Faults and throws ArcaSoapError.
 function afipSoapCall(
   endpoint: string,
   namespace: string,         // e.g. "http://ar.gov.afip.dif.FEV1/"
   method: string,            // e.g. "FECAESolicitar"
   params: Record<string, unknown>,
-  opts?: SoapCallOptions,
+  opts?: AfipSoapCallOptions,
 ): Promise<Record<string, unknown>>;
 
-// Checks if ARCA response contains business errors (Errors/Err nodes).
-// Throws ArcaServiceError if errors found.
+interface AfipSoapCallOptions extends SoapCallOptions {
+  requestElement?: string | null; // Request wrapper element. Default: method. null = empty Body (WSFECRED dummy)
+  responseElement?: string;       // Default: `${method}Response`
+  qualified?: boolean;            // false (default): <ser:X xmlns:ser="ns"> with unqualified children.
+                                  // true: <X xmlns="ns">, children inherit the namespace (ASMX)
+  soapActionFromMethod?: boolean; // SOAPAction = namespace + method (adds "/" if missing). Explicit soapAction wins
+}
+
+// Extract the method result from a soapCall (unprefixed) or parseXml (prefixed) response.
+// Faults: uncertain false for kind "consulta" (default), true for "emision".
+function extractMethodResult(
+  parsed: Record<string, unknown>,
+  method: string,
+  options?: { kind?: "consulta" | "emision"; responseElement?: string },
+): Record<string, unknown>;
+
+// Throws ArcaServiceError if ANY business error has a code != 0 (or a non-numeric code).
+// Supported shapes: WSFE Errors.Err[]{Code,Msg}; errors.error[] / errors.err[];
+// Java services (WSMTXCA, WSFECRED) arrayErrores.codigoDescripcion[]{codigo,descripcion} and
+// arrayErroresFormato.codigoDescripcion[]; WSCPE/WSLPG errores.error[]{codigo,descripcion}.
 function checkServiceErrors(result: Record<string, unknown>, serviceName: string): void;
+
+// Same detection, without throwing. Non-numeric codes: code = 0, rawCode = original.
+function extractServiceErrors(result: Record<string, unknown>): { code: number; msg: string; rawCode?: string }[];
 
 // Parse XML string to JS object
 function parseXml(xml: string): Record<string, unknown>;
@@ -159,8 +194,8 @@ function buildXml(obj: Record<string, unknown>): string;
 // Useful for SOAP responses where single elements aren't wrapped in arrays.
 function ensureArray<T>(val: T | T[] | undefined | null): T[];
 
-// Try multiple keys on an object, return first match.
-// Useful for SOAP responses where namespace prefixes vary.
+// Try multiple own keys on an object, return the first non-null/undefined match.
+// Returns undefined if obj is not an object. Useful for SOAP responses where namespace prefixes vary.
 function getNestedValue(obj: Record<string, unknown>, ...keys: string[]): unknown;
 ```
 
@@ -179,7 +214,7 @@ function isValidCuit(cuit: string | number): boolean;
 // Remove hyphens, convert number to string. Returns 11 digits.
 function normalizeCuit(cuit: string | number): string;
 
-// Format as "XX-XXXXXXXX-X". Accepts string or number.
+// Format as "XX-XXXXXXXX-X". Accepts string or number. Throws ArcaValidationError if not 11 digits.
 function formatCuit(cuit: string | number): string;
 
 // Backward-compatible aliases (same functions):
@@ -197,22 +232,26 @@ function isValidCBU(cbu: string): boolean;
 
 // Dates (AFIP format)
 
-// Format Date or string to YYYYMMDD (AFIP standard). Uses Argentina timezone (UTC-3).
-// Passes through YYYYMMDD strings. Parses ISO strings.
+// Format to YYYYMMDD (AFIP standard).
+// - "YYYYMMDD" / "YYYY-MM-DD" strings: formatted literally (no Date involved) after checking the date exists.
+// - Date: calendar date in America/Argentina/Buenos_Aires (Intl), independent of process TZ.
+// Anything else (other string formats, nonexistent dates like "20230230") throws ArcaValidationError.
 function formatDate(date: Date | string): string;
 
-// Parse YYYYMMDD or YYYY-MM-DD string to Date.
+// Parse exact "YYYYMMDD" or "YYYY-MM-DD" to Date (Argentina noon = 15:00 UTC), so that
+// formatDate(parseAfipDate(x)) === x in any TZ. Nonexistent dates throw ArcaValidationError.
 function parseAfipDate(dateStr: string): Date;
 
-// Validate that a Date object is valid. Throws ArcaValidationError if not.
-function validateFecha(date: Date, fieldName: string): void;
+// Validate a Date, or a "YYYYMMDD"/"YYYY-MM-DD" string (same strict rules). Throws ArcaValidationError.
+function validateFecha(date: Date | string, fieldName: string): void;
 
 // Validate that fechaFin is after fechaInicio. Throws ArcaValidationError if not.
-function validateFechaRango(fechaInicio: Date, fechaFin: Date | undefined): void;
+function validateFechaRango(fechaInicio: Date | string, fechaFin: Date | string | undefined): void;
 
 // Error collection helpers (for SDK authors building validators)
 
-// Run a validation function and collect errors into an array instead of throwing.
+// Run a validation function and collect ArcaValidationError details into an array instead of throwing.
+// Any other error (e.g. a TypeError from a bug) is re-thrown.
 function collectErrors(fn: () => void, errors: ValidationErrorDetail[]): void;
 
 // Like collectErrors but prefixes field names in collected errors.
@@ -232,7 +271,7 @@ interface AccessTicket {
 }
 
 interface TicketStorage {
-  get(key: string): Promise<AccessTicket | null>;
+  get(key: string, options?: { onError?: (error: Error) => void }): Promise<AccessTicket | null>;
   set(key: string, ticket: AccessTicket): Promise<void>;
   delete?(key: string): Promise<void>;
 }
@@ -241,14 +280,23 @@ interface CallOptions {
   signal?: AbortSignal;
 }
 
+// Base config extended by every SDK.
 interface ArcaBaseConfig {
   cert: string;                               // X.509 certificate PEM
   key: string;                                // Private key PEM
+  cuit: number | string;                      // Represented CUIT
   production?: boolean;                       // Default: false
   timeout?: number;                           // Default: 30000ms
   retries?: number;                           // Default: 1
   retryDelayMs?: number;                      // Default: 1000ms
+  tokenTTLMinutes?: number;                   // Default: 720
   onEvent?: (event: ArcaEvent) => void;
+  ticketStorage?: TicketStorage;
+  clockOffsetMs?: number;                     // Default: 0
+  autoClockSkew?: boolean;                    // Default: true
+  loginErrorCooldownMs?: number;              // Default: 60000
+  fetch?: typeof fetch;
+  legacyTls?: "auto" | "never" | "always";    // Default: "auto"
 }
 
 interface SoapCallOptions {
@@ -260,6 +308,8 @@ interface SoapCallOptions {
   methodName?: string;                        // For event reporting
   kind?: "consulta" | "emision";              // Default: "consulta". Emisiones are never retried
   signal?: AbortSignal;
+  fetch?: typeof fetch;                       // Custom fetch (no legacy TLS fallback when injected)
+  legacyTls?: "auto" | "never" | "always";    // Default: "auto"
 }
 
 interface ServerStatus {
@@ -292,6 +342,9 @@ interface WsaaClientConfig {
   ticketStorage?: TicketStorage;
   clockOffsetMs?: number;                     // Default: 0
   autoClockSkew?: boolean;                    // Default: true
+  loginErrorCooldownMs?: number;              // Default: 60000. 0 disables
+  fetch?: typeof fetch;
+  legacyTls?: "auto" | "never" | "always";    // Default: "auto"
 }
 
 interface ValidationErrorDetail {
@@ -311,10 +364,19 @@ const WSAA_ENDPOINTS = {
 
 const WSAA_NAMESPACE = "http://wsaa.view.sua.dvadac.desein.afip.gov";
 
+// FEParamGetTiposDoc. Source: ARCA "Tablas del sistema" (afip.gob.ar/fe/ayuda/tablas.asp). No code 15.
 enum DocTipo {
+  CI_POLICIA_FEDERAL = 0,
+  CI_BUENOS_AIRES = 1, CI_CATAMARCA = 2, CI_CORDOBA = 3, CI_CORRIENTES = 4, CI_ENTRE_RIOS = 5,
+  CI_JUJUY = 6, CI_MENDOZA = 7, CI_LA_RIOJA = 8, CI_SALTA = 9, CI_SAN_JUAN = 10, CI_SAN_LUIS = 11,
+  CI_SANTA_FE = 12, CI_SANTIAGO_DEL_ESTERO = 13, CI_TUCUMAN = 14, CI_CHACO = 16, CI_CHUBUT = 17,
+  CI_FORMOSA = 18, CI_MISIONES = 19, CI_NEUQUEN = 20, CI_LA_PAMPA = 21, CI_RIO_NEGRO = 22,
+  CI_SANTA_CRUZ = 23, CI_TIERRA_DEL_FUEGO = 24,
+  CERTIFICADO_MIGRACION = 30,
   CUIT = 80,
   CUIL = 86,
   CDI = 87,
+  ANSES_PADRON = 88,
   LE = 89,
   LC = 90,
   CI_EXTRANJERA = 91,
@@ -323,9 +385,11 @@ enum DocTipo {
   PASAPORTE = 94,
   CI_BS_AS_RNP = 95,
   DNI = 96,
+  SIN_IDENTIFICAR = 99,   // alias: "Sin identificar/venta global diaria"
   CONSUMIDOR_FINAL = 99,
 }
 
+// ARCA/SUPA province codes (Padrón idProvincia). Source: ARCA "Tablas del sistema". No code 15.
 enum Provincia {
   CIUDAD_AUTONOMA_DE_BUENOS_AIRES = 0,
   BUENOS_AIRES = 1,
@@ -342,15 +406,15 @@ enum Provincia {
   SANTA_FE = 12,
   SANTIAGO_DEL_ESTERO = 13,
   TUCUMAN = 14,
-  CHACO = 15,
-  CHUBUT = 16,
-  FORMOSA = 17,
-  MISIONES = 18,
-  NEUQUEN = 19,
-  LA_PAMPA = 20,
-  RIO_NEGRO = 21,
-  SANTA_CRUZ = 22,
-  TIERRA_DEL_FUEGO = 23,
+  CHACO = 16,
+  CHUBUT = 17,
+  FORMOSA = 18,
+  MISIONES = 19,
+  NEUQUEN = 20,
+  LA_PAMPA = 21,
+  RIO_NEGRO = 22,
+  SANTA_CRUZ = 23,
+  TIERRA_DEL_FUEGO = 24,
 }
 ```
 
@@ -391,7 +455,7 @@ try {
 
 ## Retry behavior
 
-Enabled by default (`retries: 1`) only for `kind: "consulta"` (queries, WSAA login). Retries on: network errors, timeouts, HTTP 5xx without SOAP Fault. Does NOT retry on: SOAP Faults, 4xx, business errors, validation errors, or user aborts. Backoff formula: `retryDelayMs * 2^(attempt-1)`.
+Enabled by default (`retries: 1`) only for `kind: "consulta"` (queries, WSAA login). Retries on: network errors, timeouts, HTTP 5xx without SOAP Fault, 2xx responses without a SOAP Envelope. Does NOT retry on: SOAP Faults, 4xx, business errors, validation errors, or user aborts. Backoff formula: `retryDelayMs * 2^(attempt-1)`.
 `kind: "emision"` (e.g. FECAESolicitar) is never retried: errors carry `uncertain: true` when the server may have processed the request (timeout, dropped connection, 5xx, unreadable response) and `uncertain: false` when it certainly did not (DNS failure, connection refused, 4xx, aborted before sending).
 
 ## Module formats

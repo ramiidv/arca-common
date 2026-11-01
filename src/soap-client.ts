@@ -1,6 +1,8 @@
 import { XMLParser, XMLBuilder } from 'fast-xml-parser';
 import { ArcaSoapError, ArcaServiceError } from './errors.js';
-import type { ArcaEvent, SoapCallOptions } from './types.js';
+import type { ServiceErrorDetail } from './errors.js';
+import { legacyTlsRequest, LegacyTlsResponseError } from './legacy-tls.js';
+import type { ArcaEvent, SoapCallOptions, SoapOperationKind } from './types.js';
 
 // ---------------------------------------------------------------------------
 // XML helpers
@@ -54,14 +56,44 @@ export function ensureArray<T>(val: T | T[] | undefined | null): T[] {
 }
 
 /**
- * Busca un valor en un objeto probando múltiples keys posibles.
- * Útil para respuestas SOAP donde los prefijos de namespace varían.
+ * Busca un valor en un objeto probando múltiples keys posibles (solo
+ * propiedades propias). Útil para respuestas SOAP donde los prefijos de
+ * namespace varían.
+ *
+ * Si una key existe pero vale `undefined`/`null`, sigue probando las
+ * siguientes. Si `obj` no es un objeto, devuelve `undefined`.
  */
 export function getNestedValue(obj: Record<string, unknown>, ...keys: string[]): unknown {
+  if (obj === null || typeof obj !== 'object') return undefined;
+  let nullish: unknown = undefined;
   for (const key of keys) {
-    if (key in obj) return obj[key];
+    if (!Object.hasOwn(obj, key)) continue;
+    const value = obj[key];
+    if (value !== undefined && value !== null) return value;
+    if (value === null) nullish = null;
+  }
+  return nullish;
+}
+
+/**
+ * Busca en `obj` la key cuyo nombre local (sin prefijo de namespace) es alguno
+ * de `names`: `"Body"` encuentra `Body`, `soap:Body`, `S:Body`, etc.
+ */
+function findLocalKey(obj: unknown, ...names: string[]): string | undefined {
+  if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) return undefined;
+  const keys = Object.keys(obj);
+  for (const name of names) {
+    if (Object.hasOwn(obj, name)) return name;
+    const prefixed = keys.find((k) => k.endsWith(`:${name}`));
+    if (prefixed) return prefixed;
   }
   return undefined;
+}
+
+/** Valor de la key con nombre local `name` (ver `findLocalKey`). */
+function localValue(obj: unknown, ...names: string[]): unknown {
+  const key = findLocalKey(obj, ...names);
+  return key === undefined ? undefined : (obj as Record<string, unknown>)[key];
 }
 
 // ---------------------------------------------------------------------------
@@ -119,25 +151,49 @@ function networkErrorCode(err: unknown): string | undefined {
 
 function textOf(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
+  if (Array.isArray(value)) return textOf(value[0]);
   if (typeof value === 'object') {
     const obj = value as Record<string, unknown>;
-    if ('#text' in obj) return String(obj['#text']);
+    if (Object.hasOwn(obj, '#text')) return String(obj['#text']);
     // SOAP 1.2: <Reason><Text>...</Text></Reason>, <Code><Value>...</Value></Code>
-    return textOf(obj['Text'] ?? obj['Value']);
+    return textOf(localValue(obj, 'Text', 'Value'));
   }
   return String(value);
 }
 
-/** Extrae `faultcode`/`faultstring` de una respuesta SOAP ya parseada (sin prefijos). */
+/** Body del Envelope SOAP de una respuesta parseada (con o sin prefijos), si existe. */
+function soapBody(parsed: unknown): Record<string, unknown> | undefined {
+  const envelope = localValue(parsed, 'Envelope');
+  const body = localValue(envelope, 'Body');
+  return body !== null && typeof body === 'object' ? (body as Record<string, unknown>) : undefined;
+}
+
+/**
+ * Extrae `faultcode`/`faultstring` de una respuesta SOAP ya parseada, con o
+ * sin prefijos de namespace (`soapCall` o `parseXml`).
+ */
 function extractFault(parsed: Record<string, unknown>): { faultCode?: string; faultString: string } | undefined {
-  const envelope = parsed['Envelope'] as Record<string, unknown> | undefined;
-  const body = envelope?.['Body'] as Record<string, unknown> | undefined;
-  const fault = body?.['Fault'] as Record<string, unknown> | undefined;
-  if (!fault) return undefined;
+  return faultFromBody(soapBody(parsed));
+}
+
+function faultFromBody(body: Record<string, unknown> | undefined): { faultCode?: string; faultString: string } | undefined {
+  const fault = localValue(body, 'Fault');
+  if (fault === undefined || fault === null) return undefined;
+  if (typeof fault !== 'object') return { faultString: String(fault) || 'SOAP Fault desconocido' };
   return {
-    faultCode: textOf(fault['faultcode'] ?? fault['Code']),
-    faultString: textOf(fault['faultstring'] ?? fault['Reason']) ?? 'SOAP Fault desconocido',
+    faultCode: textOf(localValue(fault, 'faultcode', 'Code')),
+    faultString: textOf(localValue(fault, 'faultstring', 'Reason')) ?? 'SOAP Fault desconocido',
   };
+}
+
+/**
+ * Un SOAP Fault es una respuesta del servidor: un rechazo determinístico. En
+ * consultas es cierto que no cambió nada; en emisiones se mantiene `uncertain`
+ * por prudencia (algunos servicios devuelven Faults ante errores internos que
+ * pudieron ocurrir después de procesar el comprobante).
+ */
+function faultUncertain(kind: SoapOperationKind | undefined): boolean {
+  return kind === 'emision';
 }
 
 function parseResponseDate(header: string | null): Date | undefined {
@@ -181,20 +237,63 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 // soapCall
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Transporte TLS legacy
+// ---------------------------------------------------------------------------
+
+/** Hosts que necesitaron el transporte legacy (DH de 1024 bits), para no fallar la primera vez cada vez. */
+const legacyTlsHosts = new Set<string>();
+
+function hostOf(endpoint: string): string {
+  try {
+    return new URL(endpoint).host;
+  } catch {
+    return endpoint;
+  }
+}
+
+/** Respuesta HTTP normalizada (de `fetch` o del transporte legacy). */
+interface TransportResponse {
+  status: number;
+  statusText: string;
+  ok: boolean;
+  date: string | null;
+  /** Lee el body. Puede fallar si la conexión se corta. */
+  text(): Promise<string>;
+}
+
+function fromFetchResponse(response: Response): TransportResponse {
+  return {
+    status: response.status,
+    statusText: response.statusText,
+    ok: response.ok,
+    date: response.headers.get('date'),
+    text: () => response.text(),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// soapCall
+// ---------------------------------------------------------------------------
+
 /**
  * Llamada SOAP genérica de bajo nivel.
  * Construye el envelope SOAP, envía via fetch con timeout, y parsea la
  * respuesta XML. Los prefijos de namespace se eliminan de la respuesta
  * parseada (`soap:Envelope` → `Envelope`).
  *
- * - `kind: 'consulta'` (default): reintenta errores de red, timeouts y 5xx
- *   sin SOAP Fault, con backoff exponencial.
+ * - `kind: 'consulta'` (default): reintenta errores de red, timeouts, 5xx
+ *   sin SOAP Fault y respuestas que no son SOAP, con backoff exponencial.
  * - `kind: 'emision'`: nunca reintenta. Si no hay certeza de que el request no
  *   se procesó, el error tiene `uncertain: true`.
  *
- * Los SOAP Faults (aunque vengan con HTTP 500) se lanzan como `ArcaSoapError`
- * con `faultCode`/`faultString`. Todos los errores con respuesta incluyen
- * `responseDate` (header `Date` del servidor).
+ * Los SOAP Faults (con HTTP 500 o 200) se lanzan como `ArcaSoapError` con
+ * `faultCode`/`faultString`; en consultas no son `uncertain`. Todos los errores
+ * con respuesta incluyen `responseDate` (header `Date` del servidor).
+ *
+ * Si el `fetch` por defecto falla con `ERR_SSL_DH_KEY_TOO_SMALL` (hosts con DH
+ * de 1024 bits), el mismo request se reintenta una vez con un transporte
+ * `node:https` con `SECLEVEL=1` (ver `legacyTls`).
  */
 export async function soapCall(
   endpoint: string,
@@ -208,6 +307,9 @@ export async function soapCall(
   const onEvent = opts?.onEvent;
   const methodName = opts?.methodName ?? 'unknown';
   const externalSignal = opts?.signal;
+  const injectedFetch = opts?.fetch;
+  const legacyTls = opts?.legacyTls ?? 'auto';
+  const host = hostOf(endpoint);
 
   const envelope =
     `<?xml version="1.0" encoding="UTF-8"?>` +
@@ -254,6 +356,62 @@ export async function soapCall(
     throw error;
   }
 
+  /** Envía el request por `fetch` o por el transporte legacy, con fallback ante DH chico. */
+  async function send(signal: AbortSignal): Promise<TransportResponse> {
+    const useLegacy =
+      injectedFetch === undefined &&
+      (legacyTls === 'always' || (legacyTls === 'auto' && legacyTlsHosts.has(host)));
+    if (useLegacy) return sendLegacy(signal);
+
+    const doFetch = injectedFetch ?? globalThis.fetch;
+    try {
+      const response = await doFetch(endpoint, { method: 'POST', headers, body: envelope, signal });
+      return fromFetchResponse(response);
+    } catch (err) {
+      // Falla de handshake: el request no se envió, así que es seguro
+      // reintentarlo con el transporte legacy (también en emisiones).
+      if (
+        injectedFetch === undefined &&
+        legacyTls === 'auto' &&
+        !signal.aborted &&
+        networkErrorCode(err) === 'ERR_SSL_DH_KEY_TOO_SMALL'
+      ) {
+        legacyTlsHosts.add(host);
+        return sendLegacy(signal);
+      }
+      throw err;
+    }
+  }
+
+  async function sendLegacy(signal: AbortSignal): Promise<TransportResponse> {
+    try {
+      const res = await legacyTlsRequest(endpoint, { method: 'POST', headers, body: envelope, signal });
+      return {
+        status: res.status,
+        statusText: res.statusText,
+        ok: res.status >= 200 && res.status < 300,
+        date: res.headers['date'] ?? null,
+        text: async () => res.body,
+      };
+    } catch (err) {
+      if (err instanceof LegacyTlsResponseError) {
+        // El servidor ya respondió y el body se cortó: se informa como error de lectura.
+        const status = err.status;
+        const date = err.headers['date'] ?? null;
+        return {
+          status,
+          statusText: '',
+          ok: status >= 200 && status < 300,
+          date,
+          text: async () => {
+            throw err.cause ?? err;
+          },
+        };
+      }
+      throw err;
+    }
+  }
+
   /** Devuelve la respuesta parseada, o el error (sin lanzarlo) para decidir el reintento. */
   async function attemptOnce(): Promise<Record<string, unknown> | ArcaSoapError> {
     const controller = new AbortController();
@@ -269,18 +427,14 @@ export async function soapCall(
     safeEmit(onEvent, { type: 'request:start', endpoint, method: methodName });
 
     try {
-      let response: Response;
+      let response: TransportResponse;
       try {
-        response = await fetch(endpoint, {
-          method: 'POST',
-          headers,
-          body: envelope,
-          signal: controller.signal,
-        });
+        response = await send(controller.signal);
       } catch (err) {
         return fetchError(err, timedOut);
       }
 
+      const responseDate = parseResponseDate(response.date);
       let responseText: string;
       try {
         responseText = await response.text();
@@ -290,13 +444,12 @@ export async function soapCall(
         return new ArcaSoapError(base.message, {
           cause: err,
           statusCode: response.status,
-          responseDate: parseResponseDate(response.headers.get('date')),
+          responseDate,
           uncertain: true,
           aborted: base.aborted,
         });
       }
 
-      const responseDate = parseResponseDate(response.headers.get('date'));
       let parsed: Record<string, unknown> | undefined;
       try {
         parsed = soapResponseParser.parse(responseText) as Record<string, unknown>;
@@ -304,27 +457,34 @@ export async function soapCall(
         parsed = undefined;
       }
 
-      if (!response.ok) {
-        const fault = parsed ? extractFault(parsed) : undefined;
-        const message = fault
-          ? `SOAP Fault: ${fault.faultString}`
-          : `HTTP ${response.status}: ${response.statusText}`;
-        return new ArcaSoapError(message, {
+      // Un Fault se lanza igual con HTTP 500 o 200.
+      const fault = parsed ? extractFault(parsed) : undefined;
+      if (fault) {
+        return new ArcaSoapError(`SOAP Fault: ${fault.faultString}`, {
           statusCode: response.status,
-          faultCode: fault?.faultCode,
-          faultString: fault?.faultString,
+          faultCode: fault.faultCode,
+          faultString: fault.faultString,
+          responseDate,
+          uncertain: faultUncertain(kind),
+        });
+      }
+
+      if (!response.ok) {
+        return new ArcaSoapError(`HTTP ${response.status}: ${response.statusText}`, {
+          statusCode: response.status,
           responseDate,
           // 4xx: el servidor rechazó el request sin procesarlo.
           uncertain: response.status >= 500,
         });
       }
 
-      if (!parsed) {
-        return new ArcaSoapError(`Respuesta XML inválida de ${methodName}`, {
-          statusCode: response.status,
-          responseDate,
-          uncertain: true,
-        });
+      if (!parsed || !soapBody(parsed)) {
+        // 2xx sin Envelope SOAP (ej: página HTML de mantenimiento de un proxy):
+        // error de transporte, reintentable en consultas.
+        return new ArcaSoapError(
+          `Respuesta inválida de ${methodName}: HTTP ${response.status} sin SOAP Envelope`,
+          { statusCode: response.status, responseDate, uncertain: true },
+        );
       }
 
       safeEmit(onEvent, { type: 'request:end', endpoint, method: methodName, durationMs: Date.now() - startTime });
@@ -358,6 +518,11 @@ export async function soapCall(
   }
 }
 
+/** @internal Solo para tests: olvida los hosts que necesitaron TLS legacy. */
+export function resetLegacyTlsHosts(): void {
+  legacyTlsHosts.clear();
+}
+
 /** Error para una llamada cancelada por el caller antes de enviarse (no se procesó nada). */
 export function abortedBeforeSend(methodName: string, reason: unknown): ArcaSoapError {
   return new ArcaSoapError(`Llamada a ${methodName} abortada antes de enviarse`, {
@@ -371,19 +536,41 @@ export function abortedBeforeSend(methodName: string, reason: unknown): ArcaSoap
 // afipSoapCall
 // ---------------------------------------------------------------------------
 
-function findKey(obj: Record<string, unknown>, ...names: string[]): string | undefined {
-  for (const name of names) {
-    if (name in obj) return name;
-  }
-  return undefined;
+/** Opciones de `afipSoapCall`: las de `soapCall` más la forma del request/respuesta. */
+export interface AfipSoapCallOptions extends SoapCallOptions {
+  /**
+   * Nombre del elemento wrapper del request (default: `method`). `null` envía
+   * el Body vacío (ej: `dummy` de WSFECRED).
+   */
+  requestElement?: string | null;
+  /** Nombre del elemento de respuesta (default: `${method}Response`). */
+  responseElement?: string;
+  /**
+   * `false` (default): `<ser:metodo xmlns:ser="ns">` con hijos sin namespace
+   * (`elementFormDefault="unqualified"`, ej: Padrón, WSAA).
+   * `true`: `<metodo xmlns="ns">` y los hijos heredan el namespace
+   * (`elementFormDefault="qualified"`, ej: servicios ASMX como WSFEv1).
+   */
+  qualified?: boolean;
+  /**
+   * Usa `namespace + method` como SOAPAction (con `/` intermedia si el
+   * namespace no termina en `/`). Un `soapAction` explícito tiene prioridad.
+   */
+  soapActionFromMethod?: boolean;
+}
+
+/** Opciones de `extractMethodResult`. */
+export interface ExtractMethodResultOptions {
+  /** Tipo de operación: define si un SOAP Fault es `uncertain` (default: `consulta`). */
+  kind?: SoapOperationKind;
+  /** Nombre del elemento de respuesta (default: `${method}Response`). */
+  responseElement?: string;
 }
 
 /**
- * Llamada SOAP de alto nivel para web services de AFIP/ARCA con elementos
- * hijos sin namespace (`elementFormDefault="unqualified"`, ej: Padrón, WSAA).
- * Construye el body con el método prefijado (`<ser:metodo xmlns:ser="...">`)
- * para que los parámetros no hereden el namespace, llama a soapCall, y extrae
- * el resultado del método de la respuesta.
+ * Llamada SOAP de alto nivel para web services de AFIP/ARCA.
+ * Construye el body del método (ver `qualified` y `requestElement`), llama a
+ * soapCall, y extrae el resultado del método de la respuesta.
  *
  * El resultado se desenvuelve si el método responde con un único elemento
  * `{method}Result`, `{method}Return`, `return` o `*Return` (ej: `personaReturn`).
@@ -395,69 +582,78 @@ export async function afipSoapCall(
   namespace: string,
   method: string,
   params: Record<string, unknown>,
-  opts?: SoapCallOptions,
+  opts?: AfipSoapCallOptions,
 ): Promise<Record<string, unknown>> {
-  const methodBody: Record<string, unknown> = {
-    [`ser:${method}`]: {
-      '@_xmlns:ser': namespace,
-      ...params,
-    },
-  };
-  const bodyContent = buildXml(methodBody);
+  const element = opts?.requestElement === undefined ? method : opts.requestElement;
+  let bodyContent = '';
+  if (element !== null) {
+    const methodBody: Record<string, unknown> = opts?.qualified
+      ? { [element]: { '@_xmlns': namespace, ...params } }
+      : { [`ser:${element}`]: { '@_xmlns:ser': namespace, ...params } };
+    bodyContent = buildXml(methodBody);
+  }
+
+  let soapAction = opts?.soapAction;
+  if (soapAction === undefined) {
+    soapAction = opts?.soapActionFromMethod
+      ? namespace.endsWith('/') ? `${namespace}${method}` : `${namespace}/${method}`
+      : '';
+  }
 
   const parsed = await soapCall(endpoint, bodyContent, {
-    soapAction: '',
     ...opts,
-    methodName: method,
+    soapAction,
+    methodName: opts?.methodName ?? method,
   });
 
-  return extractMethodResult(parsed, method);
+  return extractMethodResult(parsed, method, { kind: opts?.kind, responseElement: opts?.responseElement });
 }
 
 /**
- * Extrae el resultado de un método de una respuesta SOAP parseada por `soapCall`.
+ * Extrae el resultado de un método de una respuesta SOAP parseada por
+ * `soapCall` (sin prefijos) o por `parseXml` (con prefijos de namespace).
  * Lanza ArcaSoapError si la respuesta no tiene la forma esperada o es un Fault.
+ *
+ * Devuelve siempre un objeto: el resultado desenvuelto (`*Result`/`*Return`/
+ * `return`) si es un objeto, o el elemento de respuesta completo; `{}` si el
+ * elemento de respuesta está vacío.
  */
 export function extractMethodResult(
   parsed: Record<string, unknown>,
   method: string,
+  options?: ExtractMethodResultOptions,
 ): Record<string, unknown> {
   const invalid = (msg: string) =>
     new ArcaSoapError(`Respuesta SOAP inválida: ${msg}`, { uncertain: true });
 
-  const envelope = getNestedValue(parsed, 'Envelope', 'soap:Envelope', 'soapenv:Envelope', 'S:Envelope') as
-    | Record<string, unknown>
-    | undefined;
-  if (!envelope) throw invalid('falta Envelope');
+  const envelope = localValue(parsed, 'Envelope');
+  if (envelope === undefined || envelope === null || typeof envelope !== 'object') throw invalid('falta Envelope');
 
-  const body = getNestedValue(envelope, 'Body', 'soap:Body', 'soapenv:Body', 'S:Body') as
-    | Record<string, unknown>
-    | undefined;
+  const body = soapBody(parsed);
   if (!body) throw invalid('falta Body');
 
-  const fault = extractFault({ Envelope: { Body: body } });
+  const fault = faultFromBody(body);
   if (fault) {
     throw new ArcaSoapError(`SOAP Fault: ${fault.faultString}`, {
       faultCode: fault.faultCode,
       faultString: fault.faultString,
-      uncertain: true,
+      uncertain: faultUncertain(options?.kind),
     });
   }
 
-  const responseKey = `${method}Response`;
-  const responseName = findKey(body, responseKey) ?? Object.keys(body).find((k) => k.endsWith(`:${responseKey}`));
-  const methodResponse = responseName ? body[responseName] : undefined;
+  const responseKey = options?.responseElement ?? `${method}Response`;
+  const methodResponse = localValue(body, responseKey);
   if (methodResponse === undefined || methodResponse === null) throw invalid(`falta ${responseKey}`);
-  if (typeof methodResponse !== 'object') return {};
+  if (typeof methodResponse !== 'object' || Array.isArray(methodResponse)) return {};
 
   const response = methodResponse as Record<string, unknown>;
   const childKeys = Object.keys(response).filter((k) => !k.startsWith('@_'));
   const resultName =
-    findKey(response, `${method}Result`, `${method}Return`, 'return') ??
+    findLocalKey(response, `${method}Result`, `${method}Return`, 'return') ??
     (childKeys.length === 1 && /(Return|Result)$/.test(childKeys[0]) ? childKeys[0] : undefined);
 
   const result = resultName ? response[resultName] : undefined;
-  if (result !== undefined && result !== null && typeof result === 'object') {
+  if (result !== undefined && result !== null && typeof result === 'object' && !Array.isArray(result)) {
     return result as Record<string, unknown>;
   }
   return response;
@@ -468,30 +664,86 @@ export function extractMethodResult(
 // ---------------------------------------------------------------------------
 
 /**
+ * Contenedores de errores de negocio conocidos y los nombres de sus ítems:
+ * - WSFE: `Errors.Err[]{Code,Msg}`
+ * - `errors.error[]` / `errors.err[]`
+ * - Servicios Java (WSMTXCA, WSFECRED): `arrayErrores.codigoDescripcion[]{codigo,descripcion}`
+ *   y `arrayErroresFormato.codigoDescripcion[]`
+ * - WSCPE / WSLPG: `errores.error[]{codigo,descripcion}`
+ */
+const ERROR_CONTAINERS: Array<[container: string, items: string[]]> = [
+  ['Errors', ['Err', 'err', 'Error', 'error']],
+  ['errors', ['error', 'err', 'Err']],
+  ['Err', []],
+  ['arrayErrores', ['codigoDescripcion']],
+  ['arrayErroresFormato', ['codigoDescripcion']],
+  ['errores', ['error', 'err']],
+];
+
+const CODE_KEYS = ['Code', 'code', 'codigo', 'Codigo'];
+const MSG_KEYS = ['Msg', 'msg', 'descripcion', 'Descripcion', 'message', 'mensaje'];
+
+function toServiceError(item: unknown): ServiceErrorDetail | undefined {
+  if (item === undefined || item === null || item === '') return undefined;
+  if (typeof item !== 'object') return { code: 0, msg: String(item) };
+
+  const obj = item as Record<string, unknown>;
+  const rawCodeValue = getNestedValue(obj, ...CODE_KEYS);
+  const rawMsg = getNestedValue(obj, ...MSG_KEYS);
+  const msg = textOf(rawMsg) ?? 'Error desconocido';
+
+  const raw = textOf(rawCodeValue)?.trim();
+  if (raw === undefined || raw === '') return { code: 0, msg };
+  if (/^-?\d+$/.test(raw)) return { code: Number(raw), msg };
+  return { code: 0, msg, rawCode: raw };
+}
+
+/**
+ * Extrae los errores de negocio de una respuesta de un WS de ARCA, sin lanzar.
+ * Reconoce los formatos de WSFE, servicios Java (WSMTXCA, WSFECRED), WSCPE,
+ * WSLPG y `errors.error[]`/`errors.err[]`. Para SDKs que devuelven los errores
+ * en lugar de lanzarlos.
+ *
+ * `code` es numérico; si el servicio devolvió un código no numérico, `code`
+ * es 0 y `rawCode` tiene el original.
+ */
+export function extractServiceErrors(result: Record<string, unknown>): ServiceErrorDetail[] {
+  if (result === null || typeof result !== 'object') return [];
+  const errors: ServiceErrorDetail[] = [];
+  for (const [containerName, itemNames] of ERROR_CONTAINERS) {
+    if (!Object.hasOwn(result, containerName)) continue;
+    for (const container of ensureArray(result[containerName])) {
+      if (container === null || container === undefined || container === '') continue;
+      let items: unknown[];
+      if (typeof container === 'object') {
+        const itemKey = itemNames.find((n) => Object.hasOwn(container as object, n));
+        // Sin ítems hijos, el contenedor es el error (ej: `Err: {Code, Msg}`).
+        items = itemKey !== undefined ? ensureArray((container as Record<string, unknown>)[itemKey]) : [container];
+      } else {
+        items = [container];
+      }
+      for (const item of items) {
+        const err = toServiceError(item);
+        if (err) errors.push(err);
+      }
+    }
+  }
+  return errors;
+}
+
+/**
  * Verifica si una respuesta de un WS de ARCA contiene errores de negocio.
- * Lanza ArcaServiceError si encuentra errores.
+ * Lanza ArcaServiceError si algún error tiene un código distinto de 0 (o un
+ * código no numérico). Ver `extractServiceErrors` para los formatos soportados.
  */
 export function checkServiceErrors(
   result: Record<string, unknown>,
   serviceName: string,
 ): void {
-  const errorsRaw = result['Errors'] ?? result['errors'] ?? result['Err'];
-  if (!errorsRaw) return;
-
-  const errorsObj = errorsRaw as Record<string, unknown>;
-  const errArray = ensureArray(errorsObj['Err'] ?? errorsObj['err'] ?? errorsObj);
-
-  const errors = errArray.map((e: unknown) => {
-    const err = e as Record<string, unknown>;
-    return {
-      code: Number(err['Code'] ?? err['code'] ?? 0),
-      msg: String(err['Msg'] ?? err['msg'] ?? 'Error desconocido'),
-    };
-  });
-
-  if (errors.length > 0 && errors[0].code !== 0) {
+  const errors = extractServiceErrors(result);
+  if (errors.some((e) => e.code !== 0 || e.rawCode !== undefined)) {
     throw new ArcaServiceError(
-      `${serviceName}: ${errors.map((e) => `[${e.code}] ${e.msg}`).join(', ')}`,
+      `${serviceName}: ${errors.map((e) => `[${e.rawCode ?? e.code}] ${e.msg}`).join(', ')}`,
       errors,
     );
   }

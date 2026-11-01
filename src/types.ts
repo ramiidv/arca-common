@@ -34,20 +34,61 @@ export interface AccessTicket {
  * vencido: el cliente lo descarta.
  */
 export interface TicketStorage {
-  get(key: string): Promise<AccessTicket | null>;
+  /**
+   * Devuelve el ticket guardado, o `null`. El segundo parámetro es opcional: si
+   * el storage detecta un problema que resuelve por su cuenta (ej: un archivo
+   * corrupto que descarta), puede informarlo con `options.onError` sin lanzar.
+   */
+  get(key: string, options?: TicketStorageGetOptions): Promise<AccessTicket | null>;
   set(key: string, ticket: AccessTicket): Promise<void>;
   delete?(key: string): Promise<void>;
 }
+
+/** Opciones que `WsaaClient` pasa a `TicketStorage.get`. */
+export interface TicketStorageGetOptions {
+  /**
+   * Informa un error que el storage resolvió sin lanzar (ej: ticket corrupto
+   * descartado). `WsaaClient` lo emite como `auth:storage-error` (operation `get`).
+   */
+  onError?: (error: Error) => void;
+}
+
+// ---------------------------------------------------------------------------
+// Transporte HTTP
+// ---------------------------------------------------------------------------
+
+/**
+ * Uso del transporte TLS "legacy" (`node:https` con `ciphers: 'DEFAULT@SECLEVEL=1'`).
+ *
+ * Algunos hosts de producción de ARCA (ej: `servicios1.afip.gov.ar`, WSFEv1 y
+ * WSCDC) negocian Diffie-Hellman de 1024 bits, que Node >= 17 rechaza con
+ * `ERR_SSL_DH_KEY_TOO_SMALL`.
+ *
+ * - `auto` (default): usa `fetch`; si el handshake falla por ese motivo,
+ *   reintenta el mismo request con el transporte legacy (es seguro: el request
+ *   no llegó a enviarse) y recuerda el host para las siguientes llamadas.
+ * - `never`: nunca usa el transporte legacy.
+ * - `always`: usa siempre el transporte legacy.
+ *
+ * Solo aplica al `fetch` por defecto: con un `fetch` inyectado no hay fallback.
+ */
+export type LegacyTlsMode = 'auto' | 'never' | 'always';
 
 // ---------------------------------------------------------------------------
 // Configuración base
 // ---------------------------------------------------------------------------
 
+/**
+ * Configuración común a todos los SDKs de ARCA. Cada SDK la extiende con sus
+ * propias opciones.
+ */
 export interface ArcaBaseConfig {
   /** Contenido del certificado X.509 en formato PEM */
   cert: string;
   /** Contenido de la clave privada en formato PEM */
   key: string;
+  /** CUIT del contribuyente que opera (representado), con o sin guiones. */
+  cuit: number | string;
   /** Usar entorno de producción (default: false = testing/homologación) */
   production?: boolean;
   /** Timeout para requests HTTP en milisegundos (default: 30000) */
@@ -56,8 +97,25 @@ export interface ArcaBaseConfig {
   retries?: number;
   /** Delay inicial entre reintentos en milisegundos, se duplica con cada intento (default: 1000) */
   retryDelayMs?: number;
+  /** Tiempo de vida del Ticket de Acceso solicitado a WSAA, en minutos (default: 720 = 12 horas). */
+  tokenTTLMinutes?: number;
   /** Callback para eventos del SDK (auth, requests, retries). */
   onEvent?: (event: ArcaEvent) => void;
+  /** Storage persistente de Tickets de Acceso (ver `TicketStorage`). Recomendado en producción. */
+  ticketStorage?: TicketStorage;
+  /** Diferencia entre el reloj de ARCA y el local, en ms (`relojARCA - relojLocal`). Default: 0. */
+  clockOffsetMs?: number;
+  /** Ajustar automáticamente el reloj si WSAA rechaza el TRA por desfase (default: true). */
+  autoClockSkew?: boolean;
+  /**
+   * Tras un login WSAA fallido, durante cuántos ms se rechazan nuevos logins
+   * para el mismo servicio sin llamar a WSAA (default: 60000; 0 lo desactiva).
+   */
+  loginErrorCooldownMs?: number;
+  /** `fetch` propio para todos los requests HTTP (proxy, mTLS, tests). Default: `globalThis.fetch`. */
+  fetch?: typeof fetch;
+  /** Uso del transporte TLS legacy para hosts con DH de 1024 bits (default: `auto`). */
+  legacyTls?: LegacyTlsMode;
 }
 
 // ---------------------------------------------------------------------------
@@ -90,6 +148,13 @@ export interface SoapCallOptions {
   kind?: SoapOperationKind;
   /** Permite cancelar el request. */
   signal?: AbortSignal;
+  /**
+   * `fetch` propio (proxy, mTLS, tests). Default: `globalThis.fetch`. Con un
+   * `fetch` inyectado no se usa el fallback de TLS legacy.
+   */
+  fetch?: typeof fetch;
+  /** Uso del transporte TLS legacy para hosts con DH de 1024 bits (default: `auto`). */
+  legacyTls?: LegacyTlsMode;
 }
 
 /** Opciones por llamada que aceptan los métodos públicos de los SDKs. */

@@ -1,6 +1,6 @@
 {
   "name": "@ramiidv/arca-common",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Utilidades compartidas para los SDKs de ARCA (ex AFIP) - WSAA, SOAP client, validadores, tipos comunes",
   "type": "module",
   "main": "./dist/cjs/index.js",
@@ -34,7 +34,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "prepublishOnly": "npm run clean && npm run build && npm test && npm run test:smoke",
-    "test:smoke": "node scripts/smoke.mjs WsaaClient ArcaError ArcaTicketVigenteError MemoryTicketStorage FileTicketStorage CondicionIva"
+    "test:smoke": "node scripts/smoke.mjs WsaaClient ArcaError ArcaTicketVigenteError MemoryTicketStorage FileTicketStorage CondicionIva afipSoapCall extractMethodResult checkServiceErrors extractServiceErrors formatDate parseAfipDate DocTipo Provincia"
   },
   "keywords": [
     "arca",

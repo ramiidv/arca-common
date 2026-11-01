@@ -195,3 +195,228 @@ describe('soapCall: regresiones', () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 0.4.0
+// ---------------------------------------------------------------------------
+
+import {
+  checkServiceErrors,
+  extractMethodResult,
+  extractServiceErrors,
+  getNestedValue,
+  parseXml,
+} from '../src/soap-client.js';
+import { ArcaServiceError } from '../src/errors.js';
+
+function sentBody(fetch: ReturnType<typeof mockFetch>, call = 0): string {
+  return (fetch.mock.calls[call] as unknown as [string, RequestInit])[1].body as string;
+}
+function sentHeaders(fetch: ReturnType<typeof mockFetch>, call = 0): Record<string, string> {
+  return (fetch.mock.calls[call] as unknown as [string, RequestInit])[1].headers as Record<string, string>;
+}
+
+describe('soapCall: SOAP Faults y respuestas no SOAP', () => {
+  it('un Fault con HTTP 200 se lanza igual que con 500', async () => {
+    const fetch = mockFetch(
+      xmlResponse(soapFault('soap:Server', 'Error interno'), 200, { date: 'Thu, 29 Oct 2026 15:00:00 GMT' }),
+    );
+    const err = await soapCall(URL, '<x/>', { retries: 2, retryDelayMs: 1 }).catch((e) => e);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(err).toBeInstanceOf(ArcaSoapError);
+    expect(err).toMatchObject({ statusCode: 200, faultCode: 'soap:Server', faultString: 'Error interno' });
+    expect(err.responseDate?.toISOString()).toBe('2026-10-29T15:00:00.000Z');
+  });
+
+  it('un Fault en consulta no es incierto; en emisión sí', async () => {
+    mockFetch(xmlResponse(soapFault('soap:Server', 'x'), 500));
+    expect((await soapCall(URL, '<x/>').catch((e) => e)).uncertain).toBe(false);
+    mockFetch(xmlResponse(soapFault('soap:Server', 'x'), 500));
+    expect((await soapCall(URL, '<x/>', { kind: 'emision' }).catch((e) => e)).uncertain).toBe(true);
+  });
+
+  it('un 200 con HTML (no SOAP) se reintenta en consultas', async () => {
+    const html = '<html><body><h1>Sitio en mantenimiento</h1></body></html>';
+    const fetch = mockFetch(xmlResponse(html), xmlResponse(OK));
+    const parsed = await soapCall(URL, '<x/>', { retries: 1, retryDelayMs: 1 });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(parsed).toHaveProperty('Envelope');
+  });
+
+  it('un 200 no SOAP en emisión es incierto', async () => {
+    mockFetch(xmlResponse('Service temporarily unavailable'));
+    const err = await soapCall(URL, '<x/>', { kind: 'emision' }).catch((e) => e);
+    expect(err).toBeInstanceOf(ArcaSoapError);
+    expect(err.uncertain).toBe(true);
+    expect(err.faultString).toBeUndefined();
+  });
+
+  it('usa el fetch inyectado en lugar del global', async () => {
+    const global = mockFetch();
+    const own = vi.fn(async () => xmlResponse(OK));
+    await soapCall(URL, '<x/>', { fetch: own as unknown as typeof fetch });
+    expect(own).toHaveBeenCalledTimes(1);
+    expect(global).not.toHaveBeenCalled();
+  });
+});
+
+describe('afipSoapCall: opciones', () => {
+  const NS = 'http://ar.gov.afip.dif.FEV1/';
+
+  it('qualified: el wrapper declara el namespace por defecto', async () => {
+    const fetch = mockFetch(
+      xmlResponse(soapEnvelope(`<FEDummyResponse xmlns="${NS}"><FEDummyResult><AppServer>OK</AppServer></FEDummyResult></FEDummyResponse>`)),
+    );
+    const result = await afipSoapCall(URL, NS, 'FEDummy', { Auth: { Token: 't' } }, { qualified: true });
+    expect(sentBody(fetch)).toContain(`<FEDummy xmlns="${NS}">`);
+    expect(sentBody(fetch)).toMatch(/<Auth>\s*<Token>t<\/Token>\s*<\/Auth>/);
+    expect(result).toEqual({ AppServer: 'OK' });
+  });
+
+  it('soapActionFromMethod arma la SOAPAction con o sin barra', async () => {
+    let fetch = mockFetch(xmlResponse(soapEnvelope('<FEDummyResponse><FEDummyResult/></FEDummyResponse>')));
+    await afipSoapCall(URL, NS, 'FEDummy', {}, { soapActionFromMethod: true });
+    expect(sentHeaders(fetch).SOAPAction).toBe(`"${NS}FEDummy"`);
+
+    fetch = mockFetch(xmlResponse(soapEnvelope('<dummyResponse/>')));
+    await afipSoapCall(URL, 'http://impl.service.wsmtxca.afip.gov.ar/service', 'dummy', {}, { soapActionFromMethod: true });
+    expect(sentHeaders(fetch).SOAPAction).toBe('"http://impl.service.wsmtxca.afip.gov.ar/service/dummy"');
+
+    fetch = mockFetch(xmlResponse(soapEnvelope('<dummyResponse/>')));
+    await afipSoapCall(URL, NS, 'dummy', {});
+    expect(sentHeaders(fetch).SOAPAction).toBe('""');
+
+    fetch = mockFetch(xmlResponse(soapEnvelope('<dummyResponse/>')));
+    await afipSoapCall(URL, NS, 'dummy', {}, { soapAction: 'explicita', soapActionFromMethod: true });
+    expect(sentHeaders(fetch).SOAPAction).toBe('"explicita"');
+  });
+
+  it('requestElement: null envía el Body vacío; requestElement/responseElement personalizados', async () => {
+    let fetch = mockFetch(xmlResponse(soapEnvelope('<ns2:dummyResponse xmlns:ns2="x"><return><appserver>OK</appserver></return></ns2:dummyResponse>')));
+    const r1 = await afipSoapCall(URL, NS, 'dummy', {}, { requestElement: null });
+    expect(sentBody(fetch)).toContain('<soapenv:Body></soapenv:Body>');
+    expect(r1).toEqual({ appserver: 'OK' });
+
+    fetch = mockFetch(
+      xmlResponse(soapEnvelope('<ns2:consultarResp xmlns:ns2="x"><consultarReturn><a>1</a></consultarReturn></ns2:consultarResp>')),
+    );
+    const r2 = await afipSoapCall(URL, NS, 'consultar', { p: 1 }, {
+      requestElement: 'consultarReq',
+      responseElement: 'consultarResp',
+    });
+    expect(sentBody(fetch)).toContain(`<ser:consultarReq xmlns:ser="${NS}">`);
+    expect(r2).toEqual({ a: 1 });
+  });
+
+  it('un Fault de afipSoapCall en consulta no es incierto', async () => {
+    mockFetch(xmlResponse(soapFault('soap:Server', 'x')));
+    const err = await afipSoapCall(URL, NS, 'dummy', {}).catch((e) => e);
+    expect(err).toMatchObject({ faultString: 'x', uncertain: false });
+  });
+});
+
+describe('extractMethodResult', () => {
+  it('detecta Faults con prefijos (salida de parseXml)', () => {
+    const parsed = parseXml(soapFault('soap:Client', 'Mal request'));
+    expect(() => extractMethodResult(parsed, 'dummy')).toThrow(ArcaSoapError);
+    try {
+      extractMethodResult(parsed, 'dummy');
+    } catch (e) {
+      expect(e).toMatchObject({ faultCode: 'soap:Client', faultString: 'Mal request', uncertain: false });
+    }
+    try {
+      extractMethodResult(parsed, 'dummy', { kind: 'emision' });
+    } catch (e) {
+      expect(e).toMatchObject({ uncertain: true });
+    }
+  });
+
+  it('devuelve la misma forma con o sin prefijos', () => {
+    const xml = soapEnvelope('<ns2:getPersonaResponse xmlns:ns2="x"><ns2:return><a>1</a></ns2:return></ns2:getPersonaResponse>');
+    expect(extractMethodResult(parseXml(xml), 'getPersona')).toEqual({ a: 1 });
+    expect(extractMethodResult(parseXml(soapEnvelope('<dummyResponse/>')), 'dummy')).toEqual({});
+  });
+});
+
+describe('getNestedValue', () => {
+  it('usa solo propiedades propias', () => {
+    expect(getNestedValue({}, 'toString')).toBeUndefined();
+    expect(getNestedValue({ constructor: 1 }, 'constructor')).toBe(1);
+  });
+
+  it('no falla con valores que no son objetos', () => {
+    expect(getNestedValue(undefined as never, 'a')).toBeUndefined();
+    expect(getNestedValue(null as never, 'a')).toBeUndefined();
+    expect(getNestedValue('texto' as never, 'length')).toBeUndefined();
+  });
+
+  it('si una key vale undefined/null prueba las siguientes', () => {
+    expect(getNestedValue({ a: undefined, b: null, c: 3 }, 'a', 'b', 'c')).toBe(3);
+    expect(getNestedValue({ a: null }, 'a', 'b')).toBeNull();
+    expect(getNestedValue({ a: 0 }, 'a', 'b')).toBe(0);
+  });
+});
+
+describe('checkServiceErrors / extractServiceErrors', () => {
+  it('WSFE: Errors.Err[]', () => {
+    const result = { Errors: { Err: [{ Code: 600, Msg: 'ValidacionDeToken' }, { Code: 601, Msg: 'CUIT' }] } };
+    expect(extractServiceErrors(result)).toEqual([
+      { code: 600, msg: 'ValidacionDeToken' },
+      { code: 601, msg: 'CUIT' },
+    ]);
+    expect(() => checkServiceErrors(result, 'WSFE')).toThrow(/\[600\] ValidacionDeToken, \[601\] CUIT/);
+  });
+
+  it('lanza si cualquier error (no solo el primero) tiene código distinto de 0', () => {
+    const result = { Errors: { Err: [{ Code: 0, Msg: 'ok' }, { Code: 10, Msg: 'mal' }] } };
+    expect(() => checkServiceErrors(result, 'X')).toThrow(ArcaServiceError);
+    expect(() => checkServiceErrors({ Errors: { Err: { Code: 0, Msg: 'ok' } } }, 'X')).not.toThrow();
+  });
+
+  it('errors.error[] y errors.err[]', () => {
+    expect(extractServiceErrors({ errors: { error: [{ code: 1, msg: 'a' }] } })).toEqual([{ code: 1, msg: 'a' }]);
+    expect(extractServiceErrors({ errors: { err: { code: 2, msg: 'b' } } })).toEqual([{ code: 2, msg: 'b' }]);
+  });
+
+  it('servicios Java: arrayErrores y arrayErroresFormato', () => {
+    const result = {
+      arrayErrores: { codigoDescripcion: [{ codigo: 101, descripcion: 'uno' }, { codigo: 102, descripcion: 'dos' }] },
+      arrayErroresFormato: { codigoDescripcion: { codigo: 5, descripcion: 'formato' } },
+    };
+    expect(extractServiceErrors(result)).toEqual([
+      { code: 101, msg: 'uno' },
+      { code: 102, msg: 'dos' },
+      { code: 5, msg: 'formato' },
+    ]);
+    expect(() => checkServiceErrors(result, 'WSMTXCA')).toThrow(ArcaServiceError);
+  });
+
+  it('WSCPE / WSLPG: errores.error[]', () => {
+    const result = { errores: { error: [{ codigo: 'CPE-1', descripcion: 'Patente inválida' }, { codigo: '12', descripcion: 'x' }] } };
+    const errors = extractServiceErrors(result);
+    expect(errors).toEqual([
+      { code: 0, msg: 'Patente inválida', rawCode: 'CPE-1' },
+      { code: 12, msg: 'x' },
+    ]);
+    const err = (() => {
+      try {
+        checkServiceErrors(result, 'WSCPE');
+      } catch (e) {
+        return e as ArcaServiceError;
+      }
+    })();
+    expect(err).toBeInstanceOf(ArcaServiceError);
+    expect(err?.message).toContain('[CPE-1] Patente inválida');
+    expect(err?.errors[0].rawCode).toBe('CPE-1');
+  });
+
+  it('un código no numérico lanza aunque code sea 0', () => {
+    expect(() => checkServiceErrors({ errores: { error: { codigo: 'ABC', descripcion: 'x' } } }, 'X')).toThrow(ArcaServiceError);
+  });
+
+  it('sin errores no lanza y devuelve []', () => {
+    expect(extractServiceErrors({ resultado: 'A' })).toEqual([]);
+    expect(extractServiceErrors({ Errors: '' })).toEqual([]);
+    expect(() => checkServiceErrors({ resultado: 'A' }, 'X')).not.toThrow();
+  });
+});

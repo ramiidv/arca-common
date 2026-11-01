@@ -10,15 +10,15 @@ import { formatDate, parseAfipDate } from "@ramiidv/arca-common";
 // formatDate — convertir a YYYYMMDD
 // ---------------------------------------------------------------------------
 
-// Desde Date (usa timezone Argentina UTC-3)
+// Desde Date: fecha calendario en Argentina (America/Argentina/Buenos_Aires)
 const hoy = formatDate(new Date());
 console.log("Hoy:", hoy); // ej: "20260331"
 
-// Desde string ISO
+// Desde YYYY-MM-DD: se formatea literal, sin pasar por Date (sin corrimientos de zona horaria)
 const fecha1 = formatDate("2026-03-31");
 console.log("Desde ISO:", fecha1); // "20260331"
 
-// Passthrough si ya es YYYYMMDD
+// YYYYMMDD se devuelve tal cual (después de validar que la fecha exista)
 const fecha2 = formatDate("20260331");
 console.log("Passthrough:", fecha2); // "20260331"
 
@@ -27,7 +27,8 @@ const request = {
   CbteFch: formatDate(new Date()),           // fecha del comprobante
   FchServDesde: formatDate("2026-03-01"),     // inicio del servicio
   FchServHasta: formatDate("2026-03-31"),     // fin del servicio
-  FchVtoPago: formatDate(new Date("2026-04-15")), // vencimiento de pago
+  FchVtoPago: formatDate("2026-04-15"),       // vencimiento de pago
+  // Ojo: new Date("2026-04-15") es medianoche UTC = 14/04 21:00 en Argentina.
 };
 console.log("Request:", request);
 
@@ -35,9 +36,13 @@ console.log("Request:", request);
 // parseAfipDate — convertir YYYYMMDD a Date
 // ---------------------------------------------------------------------------
 
-// Parsear respuestas de ARCA
+// Fechas inexistentes o formatos ambiguos lanzan ArcaValidationError:
+// formatDate("20230230"), formatDate("2026/03/31"), parseAfipDate("2026-0331")
+
+// Parsear respuestas de ARCA (devuelve el mediodía de Argentina de ese día,
+// así formatDate(parseAfipDate(x)) === x en cualquier zona horaria)
 const fecha3 = parseAfipDate("20260331");
-console.log("Parseado:", fecha3.toISOString()); // "2026-03-31T03:00:00.000Z" (aprox)
+console.log("Parseado:", fecha3.toISOString()); // "2026-03-31T15:00:00.000Z"
 console.log("Año:", fecha3.getFullYear());      // 2026
 console.log("Mes:", fecha3.getMonth() + 1);     // 3 (marzo)
 console.log("Día:", fecha3.getDate());           // 31

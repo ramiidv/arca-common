@@ -22,6 +22,13 @@ export function normalizeCuit(cuit: string | number): string {
  */
 export function formatCuit(cuit: string | number): string {
   const n = normalizeCuit(cuit);
+  if (!/^\d{11}$/.test(n)) {
+    throw new ArcaValidationError(
+      `CUIT inválido: "${cuit}". Debe tener 11 dígitos.`,
+      [{ field: 'cuit', message: 'El CUIT debe tener 11 dígitos numéricos', value: cuit }],
+      'cuit',
+    );
+  }
   return `${n.slice(0, 2)}-${n.slice(2, 10)}-${n.slice(10)}`;
 }
 
@@ -183,83 +190,141 @@ export function isValidCBU(cbu: string): boolean {
 // Fechas
 // ---------------------------------------------------------------------------
 
+const AFIP_DATE_RE = /^(\d{4})(\d{2})(\d{2})$/;
+const ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** Zona horaria de ARCA: las fechas de los comprobantes son fechas calendario de Argentina. */
+const AR_TIMEZONE = 'America/Argentina/Buenos_Aires';
+
+let arDateFormatter: Intl.DateTimeFormat | undefined;
+
+function invalidDate(value: unknown, field: string, message: string): ArcaValidationError {
+  return new ArcaValidationError(
+    `Fecha inválida en campo "${field}": "${String(value)}". ${message}`,
+    [{ field, message, value }],
+    field,
+  );
+}
+
+/**
+ * Parsea estrictamente `YYYYMMDD` o `YYYY-MM-DD` y verifica que la fecha exista
+ * (sin overflow: `20230230` o mes 13 son inválidos). Devuelve año, mes (1-12) y día.
+ */
+function parseCalendarDate(value: string, field: string): { y: number; m: number; d: number } {
+  const match = AFIP_DATE_RE.exec(value) ?? ISO_DATE_RE.exec(value);
+  if (!match) {
+    throw invalidDate(value, field, 'Formato esperado: YYYYMMDD o YYYY-MM-DD.');
+  }
+  const y = Number(match[1]);
+  const m = Number(match[2]);
+  const d = Number(match[3]);
+  const probe = new Date(0);
+  probe.setUTCFullYear(y, m - 1, d);
+  if (y < 1 || probe.getUTCFullYear() !== y || probe.getUTCMonth() !== m - 1 || probe.getUTCDate() !== d) {
+    throw invalidDate(value, field, 'La fecha no existe.');
+  }
+  return { y, m, d };
+}
+
+function pad(n: number, width: number): string {
+  return String(n).padStart(width, '0');
+}
+
 /**
  * Formatea una fecha al formato YYYYMMDD que usa AFIP/ARCA.
- * Acepta Date o string. Si recibe un string en formato YYYYMMDD, lo devuelve tal cual.
- * Usa timezone Argentina (UTC-3).
+ *
+ * - String `YYYYMMDD` o `YYYY-MM-DD`: se formatea literal (sin pasar por `Date`,
+ *   así no hay corrimientos de zona horaria), después de validar que la fecha exista.
+ * - `Date`: se toma la fecha calendario en Argentina (`America/Argentina/Buenos_Aires`).
+ *
+ * @throws ArcaValidationError si el string no tiene uno de esos formatos, la
+ *   fecha no existe, o el `Date` es inválido.
  */
 export function formatDate(date: Date | string): string {
   if (typeof date === 'string') {
-    if (/^\d{8}$/.test(date)) return date;
-    // Intentar parsear ISO u otros formatos
-    const parsed = new Date(date);
-    if (isNaN(parsed.getTime())) {
-      throw new ArcaValidationError(
-        `Fecha inválida: "${date}"`,
-        [{ field: 'fecha', message: 'No se pudo parsear la fecha', value: date }],
-        'fecha',
-      );
-    }
-    date = parsed;
+    const { y, m, d } = parseCalendarDate(date, 'fecha');
+    return `${pad(y, 4)}${pad(m, 2)}${pad(d, 2)}`;
   }
 
-  // Formatear en timezone Argentina (UTC-3)
-  const ar = new Date(date.getTime() - 3 * 60 * 60_000 + date.getTimezoneOffset() * 60_000);
-  const y = ar.getFullYear();
-  const m = String(ar.getMonth() + 1).padStart(2, '0');
-  const d = String(ar.getDate()).padStart(2, '0');
-  return `${y}${m}${d}`;
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+    throw invalidDate(date, 'fecha', 'La fecha no es válida.');
+  }
+
+  arDateFormatter ??= new Intl.DateTimeFormat('en-US', {
+    timeZone: AR_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const parts = arDateFormatter.formatToParts(date);
+  const part = (type: Intl.DateTimeFormatPartTypes) => Number(parts.find((p) => p.type === type)?.value);
+  return `${pad(part('year'), 4)}${pad(part('month'), 2)}${pad(part('day'), 2)}`;
 }
 
 /**
- * Parsea una fecha en formato YYYYMMDD (usado por AFIP/ARCA) a Date.
- * También acepta YYYY-MM-DD.
+ * Parsea una fecha en formato `YYYYMMDD` (usado por AFIP/ARCA) o `YYYY-MM-DD` a `Date`.
+ *
+ * Devuelve el mediodía de Argentina (15:00 UTC) de ese día, así
+ * `formatDate(parseAfipDate(x))` devuelve la misma fecha sin importar la zona
+ * horaria del proceso.
+ *
+ * @throws ArcaValidationError si el formato no es exacto o la fecha no existe.
  */
 export function parseAfipDate(dateStr: string): Date {
-  const clean = dateStr.replace(/-/g, '');
-  if (!/^\d{8}$/.test(clean)) {
-    throw new ArcaValidationError(
-      `Fecha AFIP inválida: "${dateStr}". Formato esperado: YYYYMMDD.`,
-      [{ field: 'fecha', message: 'Formato de fecha inválido, se espera YYYYMMDD', value: dateStr }],
-      'fecha',
-    );
+  if (typeof dateStr !== 'string') {
+    throw invalidDate(dateStr, 'fecha', 'Formato esperado: YYYYMMDD o YYYY-MM-DD.');
   }
-  const y = parseInt(clean.slice(0, 4), 10);
-  const m = parseInt(clean.slice(4, 6), 10) - 1;
-  const d = parseInt(clean.slice(6, 8), 10);
-  return new Date(y, m, d);
+  const { y, m, d } = parseCalendarDate(dateStr, 'fecha');
+  const date = new Date(Date.UTC(2000, m - 1, d, 15));
+  date.setUTCFullYear(y);
+  return date;
 }
 
-/**
- * Valida que un valor sea un Date válido.
- * @throws ArcaValidationError si la fecha es inválida.
- */
-export function validateFecha(date: Date, fieldName: string): void {
-  if (!(date instanceof Date) || isNaN(date.getTime())) {
+/** Convierte un `Date` o un string `YYYYMMDD`/`YYYY-MM-DD` a `Date`, validando con las mismas reglas. */
+function toValidDate(date: Date | string, fieldName: string): Date {
+  if (typeof date === 'string') {
+    try {
+      return parseAfipDate(date);
+    } catch {
+      throw invalidDate(date, fieldName, 'Formato esperado: YYYYMMDD o YYYY-MM-DD, con una fecha existente.');
+    }
+  }
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
     throw new ArcaValidationError(
       `Fecha inválida en campo "${fieldName}".`,
       [{ field: fieldName, message: 'La fecha no es válida', value: date }],
       fieldName,
     );
   }
+  return date;
 }
 
 /**
- * Valida que fechaFin sea posterior a fechaInicio.
- * @throws ArcaValidationError si fechaFin no es posterior a fechaInicio.
+ * Valida que un valor sea un `Date` válido, o un string `YYYYMMDD`/`YYYY-MM-DD`
+ * con una fecha existente (misma validación estricta que `parseAfipDate`).
+ * @throws ArcaValidationError si la fecha es inválida.
  */
-export function validateFechaRango(fechaInicio: Date, fechaFin: Date | undefined): void {
+export function validateFecha(date: Date | string, fieldName: string): void {
+  toValidDate(date, fieldName);
+}
+
+/**
+ * Valida que fechaFin sea posterior a fechaInicio. Acepta `Date` o strings
+ * `YYYYMMDD`/`YYYY-MM-DD` (validados como en `validateFecha`).
+ * @throws ArcaValidationError si alguna fecha es inválida o fechaFin no es posterior a fechaInicio.
+ */
+export function validateFechaRango(fechaInicio: Date | string, fechaFin: Date | string | undefined): void {
   if (fechaFin === undefined) return;
 
-  validateFecha(fechaInicio, 'fechaInicio');
-  validateFecha(fechaFin, 'fechaFin');
+  const inicio = toValidDate(fechaInicio, 'fechaInicio');
+  const fin = toValidDate(fechaFin, 'fechaFin');
 
-  if (fechaFin.getTime() <= fechaInicio.getTime()) {
+  if (fin.getTime() <= inicio.getTime()) {
     throw new ArcaValidationError(
       'La fecha de fin debe ser posterior a la fecha de inicio.',
       [{
         field: 'fechaFin',
-        message: `fechaFin (${fechaFin.toISOString()}) debe ser posterior a fechaInicio (${fechaInicio.toISOString()})`,
+        message: `fechaFin (${fin.toISOString()}) debe ser posterior a fechaInicio (${inicio.toISOString()})`,
         value: { fechaInicio, fechaFin },
       }],
       'fechaFin',
@@ -274,6 +339,8 @@ export function validateFechaRango(fechaInicio: Date, fechaFin: Date | undefined
 /**
  * Ejecuta una función de validación y recolecta errores en el array provisto
  * en vez de lanzar. Útil para validar múltiples campos y reportar todos los errores juntos.
+ * Solo recolecta `ArcaValidationError`: cualquier otro error (ej: un `TypeError`
+ * por un bug) se re-lanza.
  */
 export function collectErrors(fn: () => void, errors: ValidationErrorDetail[]): void {
   try {
@@ -281,7 +348,9 @@ export function collectErrors(fn: () => void, errors: ValidationErrorDetail[]): 
   } catch (e) {
     if (e instanceof ArcaValidationError) {
       errors.push(...e.details);
+      return;
     }
+    throw e;
   }
 }
 
@@ -297,6 +366,8 @@ export function collectErrorsWithPrefix(fn: () => void, errors: ValidationErrorD
         ...err,
         field: `${prefix}.${err.field}`,
       })));
+      return;
     }
+    throw e;
   }
 }

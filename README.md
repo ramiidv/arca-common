@@ -36,11 +36,11 @@ npm install @ramiidv/arca-common
 | --- | --- |
 | **WsaaClient** | Cliente WSAA con firma CMS/PKCS#7, cache de tokens, persistencia (`ticketStorage`), deduplicacion y ajuste de reloj |
 | **Ticket storage** | `MemoryTicketStorage`, `FileTicketStorage` — implementaciones de referencia de `TicketStorage` |
-| **SOAP client** | `soapCall`, `afipSoapCall`, `checkServiceErrors` — llamadas SOAP con timeout, `signal`, retry solo en consultas y deteccion de resultados inciertos |
+| **SOAP client** | `soapCall`, `afipSoapCall`, `checkServiceErrors`, `extractServiceErrors` — llamadas SOAP con timeout, `signal`, retry solo en consultas, deteccion de resultados inciertos y fallback TLS para hosts con DH de 1024 bits |
 | **XML utilities** | `parseXml`, `buildXml`, `ensureArray`, `getNestedValue` — via fast-xml-parser |
 | **Validators** | `validateCuit`, `isValidCuit`, `validateCBU`, `isValidCBU`, `formatDate`, `parseAfipDate`, `validateFecha`, `validateFechaRango` |
 | **Errors** | Jerarquia de errores: `ArcaError`, `ArcaAuthError`, `ArcaTicketVigenteError`, `ArcaSoapError`, `ArcaServiceError`, `ArcaValidationError` |
-| **Types** | `AccessTicket`, `TicketStorage`, `ArcaBaseConfig`, `SoapCallOptions`, `CallOptions`, `ServerStatus`, `ArcaEvent` |
+| **Types** | `AccessTicket`, `TicketStorage`, `ArcaBaseConfig`, `SoapCallOptions`, `AfipSoapCallOptions`, `LegacyTlsMode`, `CallOptions`, `ServerStatus`, `ArcaEvent` |
 | **Constants** | `WSAA_ENDPOINTS`, `DocTipo`, `Provincia`, `CondicionIva` |
 
 ## Uso
@@ -129,6 +129,18 @@ ese rechazo el SDK calcula el offset desde el header `Date` de la respuesta, rei
 una sola vez y emite `auth:clock-skew`. Tambien se puede fijar a mano con `clockOffsetMs`
 (`relojARCA - relojLocal`, en ms). `wsaa.clockOffsetMs` y `wsaa.now()` exponen el offset vigente.
 
+Solo se consideran errores de reloj `xml.generationTime.invalid` y `xml.expirationTime.expired`.
+`xml.expirationTime.invalid` (vigencia pedida mayor a 24 horas) es un error de configuracion de
+`tokenTTLMinutes` y no dispara el ajuste.
+
+### Login fallido
+
+La especificacion de WSAA pide no reintentar un login rechazado enseguida. Si un login falla (por
+ejemplo, certificado no autorizado), durante `loginErrorCooldownMs` (default `60000`, `0` lo
+desactiva) `getAccessTicket` para ese servicio rechaza inmediatamente con `ArcaAuthError` (con
+`cause` = el error original) sin llamar a WSAA. No aplica a TA vigente, desfase de reloj, abort ni
+errores de red sin enviar. `clearTicket`/`clearAllTickets` limpian la espera.
+
 ### Validacion de CUIT/CUIL
 
 ```typescript
@@ -166,7 +178,7 @@ try {
 import { validateCBU, isValidCBU } from "@ramiidv/arca-common";
 
 // Valida formato de 22 digitos y checksums de ambos bloques
-const cbu = validateCBU("0110599140000041817221");
+const cbu = validateCBU("0110599500000041817221");
 
 // Check sin lanzar error
 if (isValidCBU(cbuDelCliente)) {
@@ -179,20 +191,23 @@ if (isValidCBU(cbuDelCliente)) {
 ```typescript
 import { formatDate, parseAfipDate } from "@ramiidv/arca-common";
 
-// Formatear a YYYYMMDD (formato AFIP, timezone Argentina)
+// Date: fecha calendario en America/Argentina/Buenos_Aires (no depende del TZ del proceso)
 formatDate(new Date());          // "20260331"
-formatDate("20260331");          // "20260331" (passthrough)
-formatDate("2026-03-31");        // "20260331" (parsea ISO)
+// Strings YYYYMMDD o YYYY-MM-DD: se formatean literal, sin pasar por Date
+formatDate("20260331");          // "20260331"
+formatDate("2026-03-31");        // "20260331"
+formatDate("20230230");          // ArcaValidationError: la fecha no existe
+formatDate("2026/03/31");        // ArcaValidationError: formato no soportado
 
-// Parsear YYYYMMDD a Date
-const fecha = parseAfipDate("20260331"); // Date(2026, 2, 31)
-parseAfipDate("2026-03-31");             // tambien acepta guiones
+// Parsear YYYYMMDD o YYYY-MM-DD (exactos) a Date: mediodia de Argentina de ese dia
+const fecha = parseAfipDate("20260331"); // 2026-03-31T15:00:00.000Z
+formatDate(parseAfipDate("20260331"));   // "20260331" en cualquier zona horaria
 ```
 
 ### SOAP client
 
 ```typescript
-import { soapCall, afipSoapCall, checkServiceErrors, parseXml, buildXml } from "@ramiidv/arca-common";
+import { soapCall, afipSoapCall, checkServiceErrors, extractServiceErrors, parseXml, buildXml } from "@ramiidv/arca-common";
 
 // Llamada SOAP de bajo nivel (la respuesta parseada no tiene prefijos de namespace)
 const bodyXml = '<FEDummy xmlns="http://ar.gov.afip.dif.FEV1/"/>';
@@ -211,10 +226,18 @@ const data = await afipSoapCall(
   "http://ar.gov.afip.dif.FEV1/",
   "FEDummy",
   {},
+  {
+    qualified: true,            // <FEDummy xmlns="..."> (ASMX, elementFormDefault="qualified")
+    soapActionFromMethod: true, // SOAPAction: "http://ar.gov.afip.dif.FEV1/FEDummy"
+  },
 );
+// Otras opciones: requestElement (wrapper del request; null = Body vacio),
+// responseElement (default `${method}Response`).
 
-// Verificar errores de negocio en la respuesta
+// Verificar errores de negocio en la respuesta (lanza ArcaServiceError)
 checkServiceErrors(data, "WSFE");
+// O obtenerlos sin lanzar: [{ code, msg, rawCode? }]
+const errores = extractServiceErrors(data);
 
 // Utilidades XML
 const obj = parseXml("<root><item>1</item></root>");
@@ -288,6 +311,7 @@ console.log(DocTipo.DNI);  // 96
 // Provincias
 console.log(Provincia.BUENOS_AIRES); // 1
 console.log(Provincia.CORDOBA);      // 3
+console.log(Provincia.CHACO);        // 16 (no existe el 15)
 ```
 
 ## API
@@ -308,6 +332,9 @@ console.log(Provincia.CORDOBA);      // 3
 | `ticketStorage` | `TicketStorage` | -- | Persistencia de tickets entre reinicios (recomendado) |
 | `clockOffsetMs` | `number` | `0` | Offset de reloj `relojARCA - relojLocal` en ms |
 | `autoClockSkew` | `boolean` | `true` | Ajustar el offset automaticamente si WSAA rechaza el TRA por reloj |
+| `loginErrorCooldownMs` | `number` | `60000` | Espera tras un login fallido antes de volver a llamar a WSAA (`0` = sin espera) |
+| `fetch` | `typeof fetch` | `globalThis.fetch` | `fetch` propio (proxy, mTLS, tests) |
+| `legacyTls` | `'auto' \| 'never' \| 'always'` | `'auto'` | Transporte TLS legacy para hosts con DH de 1024 bits |
 
 ### Metodos de WsaaClient
 
@@ -325,13 +352,20 @@ console.log(Provincia.CORDOBA);      // 3
 | Funcion | Descripcion |
 | --- | --- |
 | `soapCall(endpoint, bodyContent, opts?)` | Llamada SOAP de bajo nivel con retry (solo consultas), timeout y `signal` |
-| `afipSoapCall(endpoint, namespace, method, params, opts?)` | Llamada SOAP de alto nivel para WS de ARCA con parametros sin namespace (Padron, etc.) |
-| `extractMethodResult(parsed, method)` | Extrae `{method}Response/*Return` de una respuesta parseada |
-| `checkServiceErrors(result, serviceName)` | Lanza `ArcaServiceError` si hay errores de negocio |
+| `afipSoapCall(endpoint, namespace, method, params, opts?: AfipSoapCallOptions)` | Llamada SOAP de alto nivel para WS de ARCA (`qualified`, `requestElement`, `responseElement`, `soapActionFromMethod`) |
+| `extractMethodResult(parsed, method, { kind, responseElement }?)` | Extrae `{method}Response/*Return` de una respuesta parseada (con o sin prefijos de namespace) |
+| `checkServiceErrors(result, serviceName)` | Lanza `ArcaServiceError` si algun error tiene codigo distinto de 0 |
+| `extractServiceErrors(result)` | Devuelve los errores de negocio `{ code, msg, rawCode? }[]` sin lanzar |
 | `parseXml(xml)` | Parsea XML a objeto JS |
 | `buildXml(obj)` | Construye XML desde objeto JS |
 | `ensureArray(val)` | Normaliza valor/array/null a array |
-| `getNestedValue(obj, ...keys)` | Busca valor probando multiples keys (para namespaces SOAP) |
+| `getNestedValue(obj, ...keys)` | Busca valor probando multiples keys propias; saltea las que valen `null`/`undefined` |
+
+`checkServiceErrors`/`extractServiceErrors` reconocen: WSFE `Errors.Err[]{Code,Msg}`,
+`errors.error[]`/`errors.err[]`, servicios Java (WSMTXCA, WSFECRED)
+`arrayErrores.codigoDescripcion[]{codigo,descripcion}` y `arrayErroresFormato.codigoDescripcion[]`,
+y WSCPE/WSLPG `errores.error[]{codigo,descripcion}`. Si el codigo no es numerico, `code` es `0` y
+`rawCode` tiene el original.
 
 ### Validators
 
@@ -340,14 +374,14 @@ console.log(Provincia.CORDOBA);      // 3
 | `validateCuit(cuit)` | `string` | Valida CUIT/CUIL (formato + checksum), retorna 11 digitos. Acepta `string \| number` |
 | `isValidCuit(cuit)` | `boolean` | Verifica si un CUIT es valido sin lanzar error |
 | `normalizeCuit(cuit)` | `string` | Elimina guiones, acepta `string \| number` |
-| `formatCuit(cuit)` | `string` | Formatea como XX-XXXXXXXX-X, acepta `string \| number` |
+| `formatCuit(cuit)` | `string` | Formatea como XX-XXXXXXXX-X, acepta `string \| number`; lanza si no son 11 digitos |
 | `validateCBU(cbu)` | `string` | Valida CBU (22 digitos + checksums de bloques) |
 | `isValidCBU(cbu)` | `boolean` | Verifica si un CBU es valido sin lanzar error |
-| `formatDate(date)` | `string` | Formatea `Date \| string` a YYYYMMDD (timezone Argentina) |
-| `parseAfipDate(str)` | `Date` | Parsea YYYYMMDD o YYYY-MM-DD a Date |
+| `formatDate(date)` | `string` | `Date` → YYYYMMDD en zona Argentina; strings `YYYYMMDD`/`YYYY-MM-DD` literal (valida que la fecha exista) |
+| `parseAfipDate(str)` | `Date` | Parsea `YYYYMMDD` o `YYYY-MM-DD` exactos a Date (mediodia de Argentina) |
 | `validateFecha(date, fieldName)` | `void` | Valida que sea un Date valido |
 | `validateFechaRango(inicio, fin)` | `void` | Valida que fin sea posterior a inicio |
-| `collectErrors(fn, errors)` | `void` | Ejecuta validacion y recolecta errores sin lanzar |
+| `collectErrors(fn, errors)` | `void` | Ejecuta validacion y recolecta `ArcaValidationError` sin lanzar (re-lanza cualquier otro error) |
 | `collectErrorsWithPrefix(fn, errors, prefix)` | `void` | Como `collectErrors` pero prefija el campo |
 
 ### Errores
@@ -376,8 +410,9 @@ participen del `instanceof` entre copias.
 | `AccessTicket` | Token + sign + expirationTime (ISO) + generationTime? + service?. Serializable a JSON |
 | `TicketStorage` | Interfaz de persistencia de tickets: `get`, `set`, `delete?` |
 | `CallOptions` | Opciones por llamada: `signal` |
-| `ArcaBaseConfig` | Config base: cert, key, production, timeout, retries, onEvent |
-| `SoapCallOptions` | Opciones para llamadas SOAP: timeout, retries, soapAction, onEvent |
+| `ArcaBaseConfig` | Config base de los SDKs: cert, key, cuit, production, timeout, retries, retryDelayMs, tokenTTLMinutes, onEvent, ticketStorage, clockOffsetMs, autoClockSkew, loginErrorCooldownMs, fetch, legacyTls |
+| `SoapCallOptions` | Opciones para llamadas SOAP: timeout, retries, soapAction, onEvent, kind, signal, fetch, legacyTls |
+| `AfipSoapCallOptions` | `SoapCallOptions` + requestElement, responseElement, qualified, soapActionFromMethod |
 | `ServerStatus` | Estado de servidores: appserver, dbserver, authserver |
 | `ArcaEvent` | Union discriminada de eventos del SDK |
 | `WsaaClientConfig` | Config del constructor de WsaaClient |
@@ -389,8 +424,8 @@ participen del `instanceof` entre copias.
 | --- | --- | --- |
 | `WSAA_ENDPOINTS` | `{ testing, production }` | URLs de los endpoints WSAA |
 | `WSAA_NAMESPACE` | `string` | Namespace XML del WSAA |
-| `DocTipo` | `enum` | Tipos de documento (CUIT=80, CUIL=86, DNI=96, etc.) |
-| `Provincia` | `enum` | Provincias argentinas (0-23) |
+| `DocTipo` | `enum` | Tipos de documento de `FEParamGetTiposDoc` (CUIT=80, CUIL=86, DNI=96, cedulas provinciales 0-24, etc.) |
+| `Provincia` | `enum` | Codigos de provincia de ARCA (0-24, sin 15: Chaco=16, Tierra del Fuego=24) |
 | `CondicionIva` | `enum` | Condicion frente al IVA (`CondicionIVAReceptorId` de WSFEv1) |
 
 ## Eventos
@@ -417,8 +452,22 @@ No reintenta SOAP Faults, 4xx ni errores de negocio. Backoff exponencial: `retry
 Las **emisiones** (`kind: "emision"`, por ejemplo `FECAESolicitar`) nunca se reintentan: si ARCA
 proceso el request y la respuesta se perdio, un reintento chocaria con la numeracion. En su lugar,
 el error indica `uncertain: true` cuando el servidor pudo haber procesado el request (timeout,
-conexion cortada, 5xx, respuesta ilegible) y `uncertain: false` cuando hay certeza de que no
-(falla de DNS, conexion rechazada, 4xx, abortado antes de enviar).
+conexion cortada, 5xx, respuesta ilegible o sin SOAP Envelope, SOAP Fault) y `uncertain: false`
+cuando hay certeza de que no (falla de DNS, conexion rechazada, 4xx, abortado antes de enviar).
+
+En consultas, un SOAP Fault (con HTTP 500 o 200) es un rechazo deterministico del servidor:
+`uncertain: false` y no se reintenta. Una respuesta 2xx que no es SOAP (por ejemplo, una pagina
+HTML de mantenimiento) se trata como error de transporte y se reintenta.
+
+## TLS legacy (DH de 1024 bits)
+
+Algunos hosts de produccion de ARCA (`servicios1.afip.gov.ar`: WSFEv1, WSCDC) negocian
+Diffie-Hellman de 1024 bits, que Node >= 17 rechaza con `ERR_SSL_DH_KEY_TOO_SMALL`. Con
+`legacyTls: "auto"` (default), si el `fetch` por defecto falla por ese motivo, el mismo request
+se reintenta una vez con un transporte `node:https` con `ciphers: "DEFAULT@SECLEVEL=1"` (es seguro
+incluso en emisiones: el handshake fallo y el request no se envio), y el host se recuerda para las
+llamadas siguientes. `"never"` lo desactiva y `"always"` lo usa siempre. Con un `fetch` inyectado
+no hay fallback.
 
 ```typescript
 // Configurar retries

@@ -142,16 +142,28 @@ export class ArcaSoapError extends ArcaError {
 }
 
 /**
+ * Un error de negocio tal cual lo devuelve un web service de ARCA.
+ *
+ * `code` es el código numérico (0 si el servicio devolvió un código no
+ * numérico); en ese caso `rawCode` tiene el código original (ej: `"ERR-01"`).
+ */
+export interface ServiceErrorDetail {
+  code: number;
+  msg: string;
+  rawCode?: string;
+}
+
+/**
  * Error de servicio de ARCA (errores de negocio).
  * Se lanza cuando un web service responde con errores funcionales (ej: CUIT inválido, comprobante rechazado).
  * Contiene el array de errores con código y mensaje tal cual los devuelve ARCA.
  */
 export class ArcaServiceError extends ArcaError {
   static override readonly code: string = 'ARCA_SERVICE_ERROR';
-  public readonly errors: { code: number; msg: string }[];
+  public readonly errors: ServiceErrorDetail[];
 
-  constructor(message: string, errors: { code: number; msg: string }[]) {
-    super(message);
+  constructor(message: string, errors: ServiceErrorDetail[], options?: { cause?: unknown }) {
+    super(message, options);
     this.name = 'ArcaServiceError';
     this.errors = errors;
   }
@@ -166,8 +178,8 @@ export class ArcaValidationError extends ArcaError {
   public readonly field?: string;
   public readonly details: ValidationErrorDetail[];
 
-  constructor(message: string, details: ValidationErrorDetail[], field?: string) {
-    super(message);
+  constructor(message: string, details: ValidationErrorDetail[], field?: string, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = 'ArcaValidationError';
     this.details = details;
     this.field = field;

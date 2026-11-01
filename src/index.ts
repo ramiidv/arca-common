@@ -9,7 +9,7 @@ export {
   ArcaValidationError,
   ArcaTicketVigenteError,
 } from './errors.js';
-export type { ValidationErrorDetail, ArcaSoapErrorOptions } from './errors.js';
+export type { ValidationErrorDetail, ArcaSoapErrorOptions, ServiceErrorDetail } from './errors.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -17,6 +17,8 @@ export type { ValidationErrorDetail, ArcaSoapErrorOptions } from './errors.js';
 export type {
   AccessTicket,
   TicketStorage,
+  TicketStorageGetOptions,
+  LegacyTlsMode,
   ArcaBaseConfig,
   SoapCallOptions,
   SoapOperationKind,
@@ -46,7 +48,9 @@ export {
   extractMethodResult,
   safeEmit,
   checkServiceErrors,
+  extractServiceErrors,
 } from './soap-client.js';
+export type { AfipSoapCallOptions, ExtractMethodResultOptions } from './soap-client.js';
 
 // ---------------------------------------------------------------------------
 // Validators

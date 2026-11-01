@@ -191,9 +191,8 @@ describe('formatDate', () => {
     expect(formatDate('20260315')).toBe('20260315');
   });
 
-  it('parses ISO string', () => {
-    const result = formatDate('2026-03-15');
-    expect(result).toMatch(/^\d{8}$/);
+  it('formatea YYYY-MM-DD literal, sin corrimiento de zona horaria', () => {
+    expect(formatDate('2026-03-15')).toBe('20260315');
   });
 
   it('throws on invalid string', () => {
@@ -254,5 +253,125 @@ describe('validateFechaRango', () => {
   it('throws when fin equals inicio', () => {
     const d = new Date('2026-06-01');
     expect(() => validateFechaRango(d, d)).toThrow(ArcaValidationError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 0.4.0: fechas estrictas, formatCuit validado, collectErrors
+// ---------------------------------------------------------------------------
+
+import { collectErrors, collectErrorsWithPrefix } from '../src/index.js';
+import type { ValidationErrorDetail } from '../src/index.js';
+
+function withTZ(tz: string, fn: () => void): void {
+  const previous = process.env.TZ;
+  process.env.TZ = tz;
+  try {
+    fn();
+  } finally {
+    if (previous === undefined) delete process.env.TZ;
+    else process.env.TZ = previous;
+  }
+}
+
+describe('formatDate (estricto)', () => {
+  it('rechaza fechas inexistentes', () => {
+    for (const bad of ['20230230', '20231301', '00000000', '2023-02-29', '2024-00-10', '20240132']) {
+      expect(() => formatDate(bad), bad).toThrow(ArcaValidationError);
+    }
+    expect(formatDate('20240229')).toBe('20240229');
+  });
+
+  it('rechaza formatos no estrictos', () => {
+    for (const bad of ['2026-0315', '202603-15', '2026/03/15', ' 20260315', '2026-03-15T10:00:00Z', '']) {
+      expect(() => formatDate(bad), bad).toThrow(ArcaValidationError);
+    }
+  });
+
+  it('Date: usa la fecha calendario de Argentina', () => {
+    // 02:30 UTC del 15 = 23:30 del 14 en Argentina.
+    expect(formatDate(new Date('2026-03-15T02:30:00Z'))).toBe('20260314');
+    expect(formatDate(new Date('2026-03-15T03:00:00Z'))).toBe('20260315');
+  });
+
+  it('Date: no depende de la zona horaria del proceso', () => {
+    for (const tz of ['UTC', 'Asia/Tokyo', 'America/Los_Angeles', 'Pacific/Kiritimati']) {
+      withTZ(tz, () => {
+        expect(formatDate(new Date('2026-03-15T02:30:00Z')), tz).toBe('20260314');
+      });
+    }
+  });
+
+  it('rechaza un Date inválido', () => {
+    expect(() => formatDate(new Date('x'))).toThrow(ArcaValidationError);
+  });
+});
+
+describe('parseAfipDate (estricto)', () => {
+  it('rechaza guiones fuera de lugar y fechas inexistentes', () => {
+    for (const bad of ['2026-0315', '20-26-03-15', '2026--03-15', '20230230', '2023-13-01', '00000000']) {
+      expect(() => parseAfipDate(bad), bad).toThrow(ArcaValidationError);
+    }
+  });
+
+  it('formatDate(parseAfipDate(x)) === x en cualquier zona horaria', () => {
+    for (const tz of ['UTC', 'America/Argentina/Buenos_Aires', 'Asia/Tokyo', 'Pacific/Kiritimati', 'Pacific/Pago_Pago']) {
+      withTZ(tz, () => {
+        for (const x of ['20260315', '20240229', '20261231', '20260101']) {
+          expect(formatDate(parseAfipDate(x)), `${tz} ${x}`).toBe(x);
+        }
+        expect(formatDate(parseAfipDate('2026-03-15'))).toBe('20260315');
+      });
+    }
+  });
+});
+
+describe('validateFecha / validateFechaRango (estricto)', () => {
+  it('acepta strings válidos y rechaza inexistentes', () => {
+    expect(() => validateFecha('20260315', 'f')).not.toThrow();
+    expect(() => validateFecha('2026-03-15', 'f')).not.toThrow();
+    const err = (() => {
+      try {
+        validateFecha('20230230', 'fechaX');
+      } catch (e) {
+        return e as ArcaValidationError;
+      }
+    })();
+    expect(err).toBeInstanceOf(ArcaValidationError);
+    expect(err?.field).toBe('fechaX');
+  });
+
+  it('valida el rango con strings', () => {
+    expect(() => validateFechaRango('20260101', '20260102')).not.toThrow();
+    expect(() => validateFechaRango('20260102', '20260101')).toThrow(ArcaValidationError);
+    expect(() => validateFechaRango('20260101', '2026-02-30')).toThrow(ArcaValidationError);
+  });
+});
+
+describe('formatCuit (validado)', () => {
+  it('lanza si no son 11 dígitos', () => {
+    expect(() => formatCuit('2012345678')).toThrow(ArcaValidationError);
+    expect(() => formatCuit('20-12345678-6x')).toThrow(ArcaValidationError);
+    expect(() => formatCuit(123)).toThrow(ArcaValidationError);
+  });
+});
+
+describe('collectErrors', () => {
+  it('recolecta ArcaValidationError', () => {
+    const errors: ValidationErrorDetail[] = [];
+    collectErrors(() => validateCuit('1'), errors);
+    collectErrorsWithPrefix(() => validateCuit('1'), errors, 'emisor');
+    expect(errors).toHaveLength(2);
+    expect(errors[1].field).toBe('emisor.cuit');
+  });
+
+  it('re-lanza errores que no son de validación', () => {
+    const errors: ValidationErrorDetail[] = [];
+    const bug = () => {
+      (undefined as unknown as { x: number }).x;
+    };
+    expect(() => collectErrors(bug, errors)).toThrow(TypeError);
+    expect(() => collectErrorsWithPrefix(bug, errors, 'p')).toThrow(TypeError);
+    expect(errors).toHaveLength(0);
   });
 });
