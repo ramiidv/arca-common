@@ -10,11 +10,11 @@ Este paquete es la base sobre la que se construyen los SDKs de dominio:
 
 - [`@ramiidv/arca-facturacion`](https://github.com/ramiidv/arca-facturacion) — Facturacion electronica (WSFEv1, WSFEX, CAEA)
 - [`@ramiidv/arca-padron`](https://github.com/ramiidv/arca-padron) — Consulta de contribuyentes (Constancia de Inscripcion, Padron A4, A10, A13, A100)
-- [`@ramiidv/arca-empleados`](https://github.com/ramiidv/arca-empleados) — Gestion de empleados (F935)
+- [`@ramiidv/arca-empleados`](https://github.com/ramiidv/arca-empleados) — Ingreso masivo de relaciones laborales (Simplificación Registral)
 - [`@ramiidv/arca-cdc`](https://github.com/ramiidv/arca-cdc) — Constatacion de comprobantes (WSCDC)
 - [`@ramiidv/arca-fecred`](https://github.com/ramiidv/arca-fecred) — Factura de Credito Electronica MiPyME (WSFECRED)
 - [`@ramiidv/arca-sire`](https://github.com/ramiidv/arca-sire) — Retenciones electronicas (SIRE)
-- [`@ramiidv/arca-agro`](https://github.com/ramiidv/arca-agro) — Carta de porte, CTG y liquidaciones de granos (WSCPE, WSCTG, WSLPG)
+- [`@ramiidv/arca-agro`](https://github.com/ramiidv/arca-agro) — Carta de porte y liquidaciones de granos (WSCPE, WSLPG)
 - [`@ramiidv/arca-mtxca`](https://github.com/ramiidv/arca-mtxca) — Facturacion con detalle de articulos (WSMTXCA)
 
 ## Instalacion
