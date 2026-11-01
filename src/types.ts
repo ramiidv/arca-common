@@ -155,6 +155,13 @@ export interface SoapCallOptions {
   fetch?: typeof fetch;
   /** Uso del transporte TLS legacy para hosts con DH de 1024 bits (default: `auto`). */
   legacyTls?: LegacyTlsMode;
+  /**
+   * `true` (default): los textos numéricos de la respuesta se convierten a
+   * `number` (salvo los de 8 o más dígitos). `false`: todos los valores de
+   * texto quedan como string, sin conversión (para campos `xs:string` como
+   * `"10.50"` o `"1E3"`). Vale para `fetch` y para el transporte TLS legacy.
+   */
+  parseNumbers?: boolean;
 }
 
 /** Opciones por llamada que aceptan los métodos públicos de los SDKs. */

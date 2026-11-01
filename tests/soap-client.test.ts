@@ -391,6 +391,49 @@ describe('checkServiceErrors / extractServiceErrors', () => {
     expect(() => checkServiceErrors(result, 'WSMTXCA')).toThrow(ArcaServiceError);
   });
 
+  it('WSFECRED: arrayErroresFormato.codigoDescripcionString[] (XSD)', () => {
+    const result = {
+      arrayErroresFormato: {
+        codigoDescripcionString: [
+          { codigo: 'FMT01', descripcion: 'Formato inválido' },
+          { codigo: 7, descripcion: 'otro' },
+        ],
+      },
+    };
+    expect(extractServiceErrors(result)).toEqual([
+      { code: 0, msg: 'Formato inválido', rawCode: 'FMT01' },
+      { code: 7, msg: 'otro' },
+    ]);
+    expect(() => checkServiceErrors(result, 'WSFECRED')).toThrow(/\[FMT01\] Formato inválido/);
+  });
+
+  it('arrayErrores también acepta codigoDescripcionString', () => {
+    const result = { arrayErrores: { codigoDescripcionString: { codigo: 404, descripcion: 'no existe' } } };
+    expect(extractServiceErrors(result)).toEqual([{ code: 404, msg: 'no existe' }]);
+    expect(() => checkServiceErrors(result, 'WSFECRED')).toThrow(ArcaServiceError);
+  });
+
+  it('WSLPG: erroresFormato.error[] (mismo tipo que errores)', () => {
+    const result = {
+      errores: { error: { codigo: 1, descripcion: 'negocio' } },
+      erroresFormato: {
+        error: [
+          { codigo: 'CTG01', descripcion: 'Campo precioRefTn mal formado' },
+          { codigo: 2, descripcion: 'fecha' },
+        ],
+      },
+    };
+    expect(extractServiceErrors(result)).toEqual([
+      { code: 1, msg: 'negocio' },
+      { code: 0, msg: 'Campo precioRefTn mal formado', rawCode: 'CTG01' },
+      { code: 2, msg: 'fecha' },
+    ]);
+    expect(() => checkServiceErrors({ erroresFormato: result.erroresFormato }, 'WSLPG')).toThrow(
+      /\[CTG01\] Campo precioRefTn mal formado, \[2\] fecha/,
+    );
+    expect(extractServiceErrors({ erroresFormato: '' })).toEqual([]);
+  });
+
   it('WSCPE / WSLPG: errores.error[]', () => {
     const result = { errores: { error: [{ codigo: 'CPE-1', descripcion: 'Patente inválida' }, { codigo: '12', descripcion: 'x' }] } };
     const errors = extractServiceErrors(result);
@@ -418,5 +461,53 @@ describe('checkServiceErrors / extractServiceErrors', () => {
     expect(extractServiceErrors({ resultado: 'A' })).toEqual([]);
     expect(extractServiceErrors({ Errors: '' })).toEqual([]);
     expect(() => checkServiceErrors({ resultado: 'A' }, 'X')).not.toThrow();
+  });
+});
+
+describe('parseNumbers', () => {
+  const RESPONSE = soapEnvelope(
+    '<ns2:getPersonaResponse xmlns:ns2="http://a/"><personaReturn>' +
+      '<valor>10.50</valor><exp>1E3</exp><cero>007</cero><entero>42</entero><cuit>20111111112</cuit>' +
+      '<attr id="12">5</attr></personaReturn></ns2:getPersonaResponse>',
+  );
+
+  it('default (true): convierte los textos numéricos de menos de 8 dígitos', async () => {
+    mockFetch(xmlResponse(RESPONSE));
+    const result = await afipSoapCall(URL, 'http://a/', 'getPersona', {});
+    expect(result).toMatchObject({ valor: 10.5, exp: 1000, entero: 42, cuit: '20111111112' });
+  });
+
+  it('false: todos los valores de texto quedan como string (afipSoapCall)', async () => {
+    mockFetch(xmlResponse(RESPONSE));
+    const result = await afipSoapCall(URL, 'http://a/', 'getPersona', {}, { parseNumbers: false });
+    expect(result).toEqual({
+      valor: '10.50',
+      exp: '1E3',
+      cero: '007',
+      entero: '42',
+      cuit: '20111111112',
+      attr: { '@_id': '12', '#text': '5' },
+    });
+  });
+
+  it('false en soapCall: sin conversión y sin prefijos de namespace', async () => {
+    mockFetch(xmlResponse(RESPONSE));
+    const parsed = await soapCall(URL, '<x/>', { parseNumbers: false });
+    const body = (parsed.Envelope as Record<string, Record<string, Record<string, unknown>>>).Body;
+    expect(body.getPersonaResponse.personaReturn).toMatchObject({ valor: '10.50', exp: '1E3', entero: '42' });
+  });
+
+  it('false sigue detectando SOAP Faults', async () => {
+    mockFetch(xmlResponse(soapFault('soap:Server', 'Error 500'), 500));
+    const err = await soapCall(URL, '<x/>', { parseNumbers: false, retries: 0 }).catch((e) => e);
+    expect(err).toBeInstanceOf(ArcaSoapError);
+    expect(err.faultString).toBe('Error 500');
+  });
+
+  it('parseXml: default convierte, parseNumbers: false no', () => {
+    const xml = '<root><a>10.50</a><b>1E3</b><c>3</c></root>';
+    expect(parseXml(xml)).toEqual({ root: { a: 10.5, b: 1000, c: 3 } });
+    expect(parseXml(xml, { parseNumbers: false })).toEqual({ root: { a: '10.50', b: '1E3', c: '3' } });
+    expect(parseXml(xml, { parseNumbers: true })).toEqual({ root: { a: 10.5, b: 1000, c: 3 } });
   });
 });

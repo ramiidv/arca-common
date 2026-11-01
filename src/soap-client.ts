@@ -24,6 +24,25 @@ const PARSER_OPTIONS = {
 
 const xmlParser = new XMLParser(PARSER_OPTIONS);
 
+/**
+ * Igual que `PARSER_OPTIONS` pero sin conversión de tipos: todo valor de texto
+ * queda como string tal cual llegó (`"10.50"`, `"1E3"`, `"007"`). Para
+ * servicios con campos `xs:string` que parecen números (`parseNumbers: false`).
+ */
+const TEXT_PARSER_OPTIONS = { ...PARSER_OPTIONS, parseTagValue: false };
+
+const xmlTextParser = new XMLParser(TEXT_PARSER_OPTIONS);
+
+/** Opciones de `parseXml`. */
+export interface ParseXmlOptions {
+  /**
+   * `true` (default): los textos numéricos se convierten a `number` (salvo
+   * los de 8 o más dígitos, como CUIT, CAE o fechas `YYYYMMDD`).
+   * `false`: todos los valores de texto quedan como string, sin conversión.
+   */
+  parseNumbers?: boolean;
+}
+
 const xmlBuilder = new XMLBuilder({
   ignoreAttributes: false,
   attributeNamePrefix: '@_',
@@ -33,10 +52,12 @@ const xmlBuilder = new XMLBuilder({
 });
 
 /**
- * Parsea un string XML a objeto JS.
+ * Parsea un string XML a objeto JS. Con `parseNumbers: false` los valores de
+ * texto no se convierten a número.
  */
-export function parseXml(xml: string): Record<string, unknown> {
-  return xmlParser.parse(xml) as Record<string, unknown>;
+export function parseXml(xml: string, options?: ParseXmlOptions): Record<string, unknown> {
+  const parser = options?.parseNumbers === false ? xmlTextParser : xmlParser;
+  return parser.parse(xml) as Record<string, unknown>;
 }
 
 /**
@@ -106,6 +127,9 @@ function localValue(obj: unknown, ...names: string[]): unknown {
  * servidor de ARCA usa prefijos distintos para los mismos elementos.
  */
 const soapResponseParser = new XMLParser({ ...PARSER_OPTIONS, removeNSPrefix: true });
+
+/** `soapResponseParser` sin conversión de tipos (`parseNumbers: false`). */
+const soapResponseTextParser = new XMLParser({ ...TEXT_PARSER_OPTIONS, removeNSPrefix: true });
 
 /**
  * Emite un evento sin que un error del callback del usuario afecte la
@@ -294,6 +318,9 @@ function fromFetchResponse(response: Response): TransportResponse {
  * Si el `fetch` por defecto falla con `ERR_SSL_DH_KEY_TOO_SMALL` (hosts con DH
  * de 1024 bits), el mismo request se reintenta una vez con un transporte
  * `node:https` con `SECLEVEL=1` (ver `legacyTls`).
+ *
+ * Con `parseNumbers: false` los valores de texto de la respuesta quedan como
+ * string (por cualquiera de los dos transportes).
  */
 export async function soapCall(
   endpoint: string,
@@ -309,6 +336,7 @@ export async function soapCall(
   const externalSignal = opts?.signal;
   const injectedFetch = opts?.fetch;
   const legacyTls = opts?.legacyTls ?? 'auto';
+  const responseParser = opts?.parseNumbers === false ? soapResponseTextParser : soapResponseParser;
   const host = hostOf(endpoint);
 
   const envelope =
@@ -452,7 +480,7 @@ export async function soapCall(
 
       let parsed: Record<string, unknown> | undefined;
       try {
-        parsed = soapResponseParser.parse(responseText) as Record<string, unknown>;
+        parsed = responseParser.parse(responseText) as Record<string, unknown>;
       } catch {
         parsed = undefined;
       }
@@ -667,17 +695,20 @@ export function extractMethodResult(
  * Contenedores de errores de negocio conocidos y los nombres de sus ítems:
  * - WSFE: `Errors.Err[]{Code,Msg}`
  * - `errors.error[]` / `errors.err[]`
- * - Servicios Java (WSMTXCA, WSFECRED): `arrayErrores.codigoDescripcion[]{codigo,descripcion}`
- *   y `arrayErroresFormato.codigoDescripcion[]`
+ * - Servicios Java (WSMTXCA, WSFECRED): `arrayErrores` y `arrayErroresFormato`, con ítems
+ *   `codigoDescripcion[]{codigo,descripcion}` o `codigoDescripcionString[]{codigo,descripcion}`
+ *   (el XSD de WSFECRED usa este último en `arrayErroresFormato`)
  * - WSCPE / WSLPG: `errores.error[]{codigo,descripcion}`
+ * - WSLPG: `erroresFormato.error[]{codigo,descripcion}`
  */
 const ERROR_CONTAINERS: Array<[container: string, items: string[]]> = [
   ['Errors', ['Err', 'err', 'Error', 'error']],
   ['errors', ['error', 'err', 'Err']],
   ['Err', []],
-  ['arrayErrores', ['codigoDescripcion']],
-  ['arrayErroresFormato', ['codigoDescripcion']],
+  ['arrayErrores', ['codigoDescripcion', 'codigoDescripcionString']],
+  ['arrayErroresFormato', ['codigoDescripcion', 'codigoDescripcionString']],
   ['errores', ['error', 'err']],
+  ['erroresFormato', ['error', 'err']],
 ];
 
 const CODE_KEYS = ['Code', 'code', 'codigo', 'Codigo'];
@@ -701,7 +732,7 @@ function toServiceError(item: unknown): ServiceErrorDetail | undefined {
 /**
  * Extrae los errores de negocio de una respuesta de un WS de ARCA, sin lanzar.
  * Reconoce los formatos de WSFE, servicios Java (WSMTXCA, WSFECRED), WSCPE,
- * WSLPG y `errors.error[]`/`errors.err[]`. Para SDKs que devuelven los errores
+ * WSLPG (`errores` y `erroresFormato`) y `errors.error[]`/`errors.err[]`. Para SDKs que devuelven los errores
  * en lugar de lanzarlos.
  *
  * `code` es numérico; si el servicio devolvió un código no numérico, `code`

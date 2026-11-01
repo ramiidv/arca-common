@@ -126,3 +126,31 @@ describe('soapCall: fallback TLS legacy', () => {
     expect(legacy).not.toHaveBeenCalled();
   });
 });
+
+describe('soapCall: parseNumbers por el transporte legacy', () => {
+  const BODY = soapEnvelope('<R><valor>10.50</valor><exp>1E3</exp><n>3</n></R>');
+
+  function valores(parsed: Record<string, unknown>) {
+    return ((parsed.Envelope as Record<string, unknown>).Body as Record<string, unknown>).R;
+  }
+
+  it('false: el fallback ante DH chico también deja los textos como string', async () => {
+    mockFetch(dhTooSmall());
+    legacy.mockResolvedValueOnce(legacyOk(BODY));
+    const parsed = await soapCall(URL, '<x/>', { parseNumbers: false });
+    expect(legacy).toHaveBeenCalledTimes(1);
+    expect(valores(parsed)).toEqual({ valor: '10.50', exp: '1E3', n: '3' });
+  });
+
+  it("false con legacyTls: 'always'", async () => {
+    legacy.mockResolvedValueOnce(legacyOk(BODY));
+    const parsed = await soapCall(URL, '<x/>', { legacyTls: 'always', parseNumbers: false });
+    expect(valores(parsed)).toEqual({ valor: '10.50', exp: '1E3', n: '3' });
+  });
+
+  it('default: el transporte legacy convierte números como fetch', async () => {
+    legacy.mockResolvedValueOnce(legacyOk(BODY));
+    const parsed = await soapCall(URL, '<x/>', { legacyTls: 'always' });
+    expect(valores(parsed)).toEqual({ valor: 10.5, exp: 1000, n: 3 });
+  });
+});

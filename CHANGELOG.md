@@ -35,8 +35,15 @@
   `ArcaAuthError` (`cause` = error original). `clearTicket`/`clearAllTickets` lo limpian.
 - `extractServiceErrors(result)`: devuelve los errores de negocio sin lanzar. `checkServiceErrors` y
   `extractServiceErrors` reconocen también `errors.error[]`/`errors.err[]`, `arrayErrores` y
-  `arrayErroresFormato` (WSMTXCA, WSFECRED) y `errores.error[]` (WSCPE, WSLPG). Los códigos no
-  numéricos se exponen en `rawCode`.
+  `arrayErroresFormato` (WSMTXCA, WSFECRED) con ítems `codigoDescripcion[]` o
+  `codigoDescripcionString[]` (el que usa el XSD de WSFECRED en `arrayErroresFormato`),
+  `errores.error[]` (WSCPE, WSLPG) y `erroresFormato.error[]` (WSLPG). Los códigos no numéricos se
+  exponen en `rawCode`.
+- Opción `parseNumbers?: boolean` en `SoapCallOptions` (y por lo tanto en `AfipSoapCallOptions`) y en
+  `parseXml(xml, { parseNumbers })`. `true` (default) mantiene la conversión de textos numéricos a
+  `number`; `false` deja todos los valores de texto como string (`"10.50"`, `"1E3"`, `"007"`), para
+  servicios con campos `xs:string` que parecen números. Funciona por `fetch` y por el fallback TLS
+  legacy, sin necesidad de inyectar un `fetch` propio.
 - `extractMethodResult(parsed, method, { kind, responseElement })`: detecta Faults también con
   prefijos de namespace (salida de `parseXml`).
 - `ArcaBaseConfig` completo para que lo extiendan los SDKs: `cuit`, `tokenTTLMinutes`,
@@ -46,7 +53,7 @@
 - `DocTipo`: códigos faltantes de la tabla oficial (cédulas provinciales 0-24, `CERTIFICADO_MIGRACION
   = 30`, `ANSES_PADRON = 88`) y el alias `SIN_IDENTIFICAR = 99`.
 - `TicketStorage.get(key, { onError })`: un storage puede informar problemas que resolvió sin lanzar.
-- Nuevos tipos exportados: `AfipSoapCallOptions`, `ExtractMethodResultOptions`, `LegacyTlsMode`,
+- Nuevos tipos exportados: `AfipSoapCallOptions`, `ExtractMethodResultOptions`, `ParseXmlOptions`, `LegacyTlsMode`,
   `ServiceErrorDetail`, `TicketStorageGetOptions`.
 
 ### Fixes

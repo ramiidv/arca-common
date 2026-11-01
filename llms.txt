@@ -177,15 +177,17 @@ function extractMethodResult(
 
 // Throws ArcaServiceError if ANY business error has a code != 0 (or a non-numeric code).
 // Supported shapes: WSFE Errors.Err[]{Code,Msg}; errors.error[] / errors.err[];
-// Java services (WSMTXCA, WSFECRED) arrayErrores.codigoDescripcion[]{codigo,descripcion} and
-// arrayErroresFormato.codigoDescripcion[]; WSCPE/WSLPG errores.error[]{codigo,descripcion}.
+// Java services (WSMTXCA, WSFECRED) arrayErrores / arrayErroresFormato with items
+// codigoDescripcion[]{codigo,descripcion} or codigoDescripcionString[] (WSFECRED XSD);
+// WSCPE/WSLPG errores.error[]{codigo,descripcion}; WSLPG erroresFormato.error[].
 function checkServiceErrors(result: Record<string, unknown>, serviceName: string): void;
 
 // Same detection, without throwing. Non-numeric codes: code = 0, rawCode = original.
 function extractServiceErrors(result: Record<string, unknown>): { code: number; msg: string; rawCode?: string }[];
 
-// Parse XML string to JS object
-function parseXml(xml: string): Record<string, unknown>;
+// Parse XML string to JS object. By default numeric text (< 8 digits) becomes a number;
+// { parseNumbers: false } keeps every text value as a string.
+function parseXml(xml: string, options?: { parseNumbers?: boolean }): Record<string, unknown>;
 
 // Build XML string from JS object
 function buildXml(obj: Record<string, unknown>): string;
@@ -310,6 +312,8 @@ interface SoapCallOptions {
   signal?: AbortSignal;
   fetch?: typeof fetch;                       // Custom fetch (no legacy TLS fallback when injected)
   legacyTls?: "auto" | "never" | "always";    // Default: "auto"
+  parseNumbers?: boolean;                     // Default: true. false = every text value stays a string
+                                              // ("10.50", "1E3", "007"); works with fetch and legacy TLS
 }
 
 interface ServerStatus {

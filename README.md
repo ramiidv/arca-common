@@ -40,7 +40,7 @@ npm install @ramiidv/arca-common
 | **XML utilities** | `parseXml`, `buildXml`, `ensureArray`, `getNestedValue` — via fast-xml-parser |
 | **Validators** | `validateCuit`, `isValidCuit`, `validateCBU`, `isValidCBU`, `formatDate`, `parseAfipDate`, `validateFecha`, `validateFechaRango` |
 | **Errors** | Jerarquia de errores: `ArcaError`, `ArcaAuthError`, `ArcaTicketVigenteError`, `ArcaSoapError`, `ArcaServiceError`, `ArcaValidationError` |
-| **Types** | `AccessTicket`, `TicketStorage`, `ArcaBaseConfig`, `SoapCallOptions`, `AfipSoapCallOptions`, `LegacyTlsMode`, `CallOptions`, `ServerStatus`, `ArcaEvent` |
+| **Types** | `AccessTicket`, `TicketStorage`, `ArcaBaseConfig`, `SoapCallOptions`, `AfipSoapCallOptions`, `ParseXmlOptions`, `LegacyTlsMode`, `CallOptions`, `ServerStatus`, `ArcaEvent` |
 | **Constants** | `WSAA_ENDPOINTS`, `DocTipo`, `Provincia`, `CondicionIva` |
 
 ## Uso
@@ -232,7 +232,7 @@ const data = await afipSoapCall(
   },
 );
 // Otras opciones: requestElement (wrapper del request; null = Body vacio),
-// responseElement (default `${method}Response`).
+// responseElement (default `${method}Response`) y parseNumbers (ver abajo).
 
 // Verificar errores de negocio en la respuesta (lanza ArcaServiceError)
 checkServiceErrors(data, "WSFE");
@@ -240,7 +240,8 @@ checkServiceErrors(data, "WSFE");
 const errores = extractServiceErrors(data);
 
 // Utilidades XML
-const obj = parseXml("<root><item>1</item></root>");
+const obj = parseXml("<root><item>1</item></root>");           // { root: { item: 1 } }
+parseXml("<root><item>10.50</item></root>", { parseNumbers: false }); // { root: { item: "10.50" } }
 const xml = buildXml({ root: { item: 1 } });
 ```
 
@@ -356,16 +357,22 @@ console.log(Provincia.CHACO);        // 16 (no existe el 15)
 | `extractMethodResult(parsed, method, { kind, responseElement }?)` | Extrae `{method}Response/*Return` de una respuesta parseada (con o sin prefijos de namespace) |
 | `checkServiceErrors(result, serviceName)` | Lanza `ArcaServiceError` si algun error tiene codigo distinto de 0 |
 | `extractServiceErrors(result)` | Devuelve los errores de negocio `{ code, msg, rawCode? }[]` sin lanzar |
-| `parseXml(xml)` | Parsea XML a objeto JS |
+| `parseXml(xml, { parseNumbers }?)` | Parsea XML a objeto JS (`parseNumbers: false` = sin conversion a numero) |
 | `buildXml(obj)` | Construye XML desde objeto JS |
 | `ensureArray(val)` | Normaliza valor/array/null a array |
 | `getNestedValue(obj, ...keys)` | Busca valor probando multiples keys propias; saltea las que valen `null`/`undefined` |
 
 `checkServiceErrors`/`extractServiceErrors` reconocen: WSFE `Errors.Err[]{Code,Msg}`,
 `errors.error[]`/`errors.err[]`, servicios Java (WSMTXCA, WSFECRED)
-`arrayErrores.codigoDescripcion[]{codigo,descripcion}` y `arrayErroresFormato.codigoDescripcion[]`,
-y WSCPE/WSLPG `errores.error[]{codigo,descripcion}`. Si el codigo no es numerico, `code` es `0` y
-`rawCode` tiene el original.
+`arrayErrores` y `arrayErroresFormato` con items `codigoDescripcion[]{codigo,descripcion}` o
+`codigoDescripcionString[]` (el XSD de WSFECRED), WSCPE/WSLPG `errores.error[]{codigo,descripcion}` y
+WSLPG `erroresFormato.error[]`. Si el codigo no es numerico, `code` es `0` y `rawCode` tiene el original.
+
+Por defecto el parser convierte a `number` todo texto numerico de menos de 8 digitos (CUIT, CAE y
+fechas `YYYYMMDD` quedan como string). En servicios con campos `xs:string` que parecen numeros
+(`"10.50"` pasaria a `10.5` y `"1E3"` a `1000`), pasa `parseNumbers: false` a `soapCall`/`afipSoapCall`
+(o a `parseXml`): todos los valores de texto quedan como string, tambien por el transporte TLS legacy,
+y los campos numericos se convierten en el SDK.
 
 ### Validators
 
@@ -411,7 +418,7 @@ participen del `instanceof` entre copias.
 | `TicketStorage` | Interfaz de persistencia de tickets: `get`, `set`, `delete?` |
 | `CallOptions` | Opciones por llamada: `signal` |
 | `ArcaBaseConfig` | Config base de los SDKs: cert, key, cuit, production, timeout, retries, retryDelayMs, tokenTTLMinutes, onEvent, ticketStorage, clockOffsetMs, autoClockSkew, loginErrorCooldownMs, fetch, legacyTls |
-| `SoapCallOptions` | Opciones para llamadas SOAP: timeout, retries, soapAction, onEvent, kind, signal, fetch, legacyTls |
+| `SoapCallOptions` | Opciones para llamadas SOAP: timeout, retries, soapAction, onEvent, kind, signal, fetch, legacyTls, parseNumbers |
 | `AfipSoapCallOptions` | `SoapCallOptions` + requestElement, responseElement, qualified, soapActionFromMethod |
 | `ServerStatus` | Estado de servidores: appserver, dbserver, authserver |
 | `ArcaEvent` | Union discriminada de eventos del SDK |

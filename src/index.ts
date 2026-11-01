@@ -50,7 +50,7 @@ export {
   checkServiceErrors,
   extractServiceErrors,
 } from './soap-client.js';
-export type { AfipSoapCallOptions, ExtractMethodResultOptions } from './soap-client.js';
+export type { AfipSoapCallOptions, ExtractMethodResultOptions, ParseXmlOptions } from './soap-client.js';
 
 // ---------------------------------------------------------------------------
 // Validators
