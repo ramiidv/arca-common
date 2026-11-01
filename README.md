@@ -1,3 +1,8 @@
+> [!IMPORTANT]
+> **Repositorio archivado.** El desarrollo de `@ramiidv/arca-common` sigue en el monorepo
+> [ramiidv/arca-sdks](https://github.com/ramiidv/arca-sdks/tree/main/packages/common).
+> Desde la versión 0.5.0, el paquete se publica desde ahí. Los issues y PRs van en ese repo.
+
 # @ramiidv/arca-common
 
 [![npm](https://img.shields.io/npm/v/@ramiidv/arca-common)](https://www.npmjs.com/package/@ramiidv/arca-common)
